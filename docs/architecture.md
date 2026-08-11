@@ -124,6 +124,8 @@ stateDiagram-v2
 
 `waiting_external` 表示 PlantCARE 等外部任务已经提交但结果尚未返回。它不能占用普通分析 worker。
 
+`waiting_dependency` 表示工作流父任务正在等待子任务。父任务通过 `parent_job + workflow_step` 唯一约束关联子任务，django-q2 Schedule 周期推进依赖，不在 API 请求或普通 worker 内阻塞等待。
+
 ## 7. 分析产物模型
 
 大文件、图片和压缩包不应塞入任务 JSON。已建立两类清单：
@@ -256,7 +258,8 @@ sequenceDiagram
 7. [x] 建立 FASTA Input Artifact、校验与标准化任务。
 8. [x] 建立 MAFFT adapter、运行时能力探测和 Artifact 串联。
 9. [x] 建立 FastTree adapter 与受校验的 Newick 输出。
-10. [ ] 接入完整基因家族分析工具链。
+10. [x] 建立持久化 FASTA → MAFFT → FastTree 工作流编排。
+11. [ ] 接入完整基因家族分析工具链。
 
 ## 14. 架构验收标准
 

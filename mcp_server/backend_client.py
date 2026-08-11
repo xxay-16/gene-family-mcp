@@ -166,5 +166,30 @@ class BackendClient:
             idempotency_key=idempotency_key,
         )
 
+    def submit_sequence_phylogeny(
+        self,
+        fasta: str,
+        alphabet: str = 'auto',
+        alignment_strategy: str = 'auto',
+        tree_model: str = 'auto',
+        threads: int = 2,
+        filename: str = 'input.fasta',
+        idempotency_key: str = '',
+    ) -> dict[str, Any]:
+        input_artifact = self.create_fasta_input(fasta, filename)
+        job = self.create_job(
+            'sequence_phylogeny',
+            {
+                'input_artifact_id': input_artifact['input_artifact_id'],
+                'alphabet': alphabet,
+                'alignment_strategy': alignment_strategy,
+                'tree_model': tree_model,
+                'threads': threads,
+            },
+            idempotency_key=idempotency_key,
+        )
+        job['input_artifact'] = input_artifact
+        return job
+
     def get_task_status(self, task_id: str) -> dict[str, Any]:
         return self.get_job(task_id)

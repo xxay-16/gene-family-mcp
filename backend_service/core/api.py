@@ -18,20 +18,33 @@ def ready(request):
         with connection.cursor() as cursor:
             cursor.execute('SELECT 1')
             cursor.fetchone()
-        schedule_exists = Schedule.objects.filter(
-            name='gene-family-poll-external-results',
-        ).exclude(repeats=0).exists()
+        active_schedule_names = set(
+            Schedule.objects.filter(
+                name__in=[
+                    'gene-family-poll-external-results',
+                    'gene-family-advance-workflows',
+                ],
+            )
+            .exclude(repeats=0)
+            .values_list('name', flat=True)
+        )
     except Exception:
         return Response(
             {'status': 'not_ready', 'service': 'gene-family-backend'},
             status=503,
         )
-    if not schedule_exists:
+    required_schedule_names = {
+        'gene-family-poll-external-results',
+        'gene-family-advance-workflows',
+    }
+    missing_schedules = sorted(required_schedule_names - active_schedule_names)
+    if missing_schedules:
         return Response(
             {
                 'status': 'not_ready',
                 'service': 'gene-family-backend',
-                'reason': 'external result schedule is missing',
+                'reason': 'required django-q2 schedules are missing',
+                'missing_schedules': missing_schedules,
             },
             status=503,
         )
@@ -39,7 +52,7 @@ def ready(request):
         'status': 'ready',
         'service': 'gene-family-backend',
         'database': 'ok',
-        'external_result_schedule': 'ok',
+        'schedules': 'ok',
     }
 
 
@@ -88,6 +101,25 @@ def capabilities(request):
                 'protein_models': ['auto', 'jtt', 'lg', 'wag'],
                 'asynchronous': True,
                 'runtime': fasttree,
+            },
+            'sequence_phylogeny': {
+                'status': (
+                    'available'
+                    if mafft['available'] and fasttree['available']
+                    else 'unavailable'
+                ),
+                'provider': 'django-q2 workflow',
+                'input': 'FASTA text uploaded as an input Artifact',
+                'steps': [
+                    'fasta_validation',
+                    'multiple_sequence_alignment',
+                    'phylogenetic_tree',
+                ],
+                'asynchronous': True,
+                'runtime': {
+                    'mafft': mafft,
+                    'fasttree': fasttree,
+                },
             },
         },
     }

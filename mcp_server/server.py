@@ -94,6 +94,33 @@ def build_phylogenetic_tree(
 
 
 @mcp.tool()
+def run_sequence_phylogeny(
+    fasta: str,
+    alphabet: str = 'auto',
+    alignment_strategy: str = 'auto',
+    tree_model: str = 'auto',
+    threads: int = 2,
+    filename: str = 'input.fasta',
+    idempotency_key: str = '',
+) -> dict:
+    """Run FASTA validation, MAFFT alignment and FastTree as one workflow.
+
+    The workflow is persisted in the backend and can survive API or worker
+    restarts. It returns one stable parent job_id; get_job_status and
+    get_job_result expose aggregate progress, child jobs and the final Newick.
+    """
+    return backend.submit_sequence_phylogeny(
+        fasta,
+        alphabet,
+        alignment_strategy,
+        tree_model,
+        threads,
+        filename,
+        idempotency_key,
+    )
+
+
+@mcp.tool()
 def get_job_status(job_id: str) -> dict:
     """Get the current state and progress of an analysis job."""
     return backend.get_job(job_id)

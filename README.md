@@ -40,6 +40,7 @@ MCP 协议适配层，供 Codex、Claude Desktop 等 MCP 客户端连接。
 | `validate_fasta` | 上传、校验并标准化 DNA 或蛋白 FASTA |
 | `align_sequences` | 使用 MAFFT 对规范化 FASTA Artifact 进行多序列比对 |
 | `build_phylogenetic_tree` | 使用 FastTree 从 aligned FASTA 生成 Newick 树 |
+| `run_sequence_phylogeny` | 一次启动 FASTA 校验、MAFFT 和 FastTree 持久化工作流 |
 | `submit_cis_element_analysis` | 提交 DNA 启动子序列分析 |
 | `get_job_status` | 查询业务任务状态与阶段 |
 | `get_job_result` | 获取完成任务的结构化结果和产物 |
@@ -209,6 +210,8 @@ Invoke-RestMethod `
 
 将 `aligned_fasta` 的 `artifact_id` 提交为 `phylogenetic_tree`，FastTree 会生成经过语法、叶数和安全标签校验的 Newick Artifact。DNA 支持 `auto/gtr/jc`，蛋白支持 `auto/jtt/lg/wag`；`auto` 分别选择 GTR 和 LG。
 
+`run_sequence_phylogeny` 将上述三步组合为一个持久化父任务。父任务使用稳定 UUID，响应中的 `workflow_steps` 显示每个子任务；django-q2 Schedule 每分钟推进已完成依赖，因此 API/worker 重启后仍可继续。最终结果聚合记录数、字母表、比对长度、树叶数和 Newick Artifact。
+
 ## 目标分析流程
 
 ```mermaid
@@ -239,6 +242,7 @@ flowchart LR
 - [x] 安全解析 PlantCARE 归档与 `.tab`，生成结构化 JSON Artifact。
 - [x] 接入 MAFFT 多序列比对 adapter、能力探测和 Artifact 溯源。
 - [x] 接入 FastTree 系统发育 adapter、Newick 校验和 Artifact 溯源。
+- [x] 建立可恢复的 FASTA → MAFFT → FastTree django-q2 工作流。
 - [ ] 接入 BLAST/DIAMOND、HMMER 和高精度 IQ-TREE。
 
 ## 工程检查

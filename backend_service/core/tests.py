@@ -47,7 +47,7 @@ class HealthAPITests(TestCase):
 
     @patch('core.api.Schedule.objects.filter')
     def test_ready_endpoint_reports_missing_schedule(self, filter_mock):
-        filter_mock.return_value.exclude.return_value.exists.return_value = False
+        filter_mock.return_value.exclude.return_value.values_list.return_value = []
 
         response = Client().get('/api/core/ready')
 

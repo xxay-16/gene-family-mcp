@@ -22,7 +22,11 @@ from .local_tools.mafft import (
 )
 from .models import AnalysisJob, Artifact
 from .newick import summarize_newick
-from .services import add_event, artifact_payload
+from .services import (
+    add_event,
+    artifact_payload,
+    create_workflow_child,
+)
 
 
 def _set_state(job: AnalysisJob, status: str, stage: str, progress: int | None):
@@ -656,6 +660,247 @@ def execute_analysis_job(job_id: str) -> dict:
             'status': job.status,
             'error_code': error_code,
         }
+
+
+def _set_workflow_wait(
+    job: AnalysisJob,
+    *,
+    stage: str,
+    progress: int,
+) -> None:
+    job.status = AnalysisJob.Status.WAITING_DEPENDENCY
+    job.stage = stage
+    job.progress = progress
+    job.lease_expires_at = None
+    if job.started_at is None:
+        job.started_at = timezone.now()
+    job.save(
+        update_fields=[
+            'status',
+            'stage',
+            'progress',
+            'lease_expires_at',
+            'started_at',
+            'updated_at',
+        ]
+    )
+
+
+def _workflow_step_failure(parent: AnalysisJob, child: AnalysisJob) -> None:
+    _fail_job(
+        parent,
+        'WORKFLOW_STEP_FAILED',
+        f'Workflow step {child.workflow_step} failed: '
+        f'{child.error_code or child.status}',
+    )
+    add_event(
+        parent,
+        'workflow_step_failed',
+        parent.error_message,
+        {
+            'child_job_id': str(child.id),
+            'child_error_code': child.error_code,
+        },
+    )
+
+
+def _advance_sequence_phylogeny(parent: AnalysisJob) -> str:
+    parent.refresh_from_db()
+    if parent.status != AnalysisJob.Status.WAITING_DEPENDENCY:
+        return parent.status
+    children = {child.workflow_step: child for child in parent.child_jobs.all()}
+    for step in ('validation', 'alignment', 'tree'):
+        child = children.get(step)
+        if child is not None and child.status in {
+            AnalysisJob.Status.FAILED,
+            AnalysisJob.Status.CANCELLED,
+        }:
+            _workflow_step_failure(parent, child)
+            return AnalysisJob.Status.FAILED
+
+    validation = children.get('validation')
+    if validation is None:
+        validation, _ = create_workflow_child(
+            parent,
+            step='validation',
+            analysis_type=AnalysisJob.AnalysisType.FASTA_VALIDATION,
+            parameters={
+                'input_artifact_id': parent.parameters['input_artifact_id'],
+                'alphabet': parent.parameters['alphabet'],
+            },
+        )
+    if validation.status != AnalysisJob.Status.SUCCEEDED:
+        _set_workflow_wait(parent, stage='waiting_validation', progress=10)
+        return parent.status
+
+    normalized_fasta = validation.artifacts.filter(kind='normalized_fasta').first()
+    if normalized_fasta is None:
+        _fail_job(
+            parent,
+            'WORKFLOW_ARTIFACT_MISSING',
+            'Validation step did not produce normalized_fasta',
+        )
+        return AnalysisJob.Status.FAILED
+    alignment = children.get('alignment')
+    if alignment is None:
+        alignment, _ = create_workflow_child(
+            parent,
+            step='alignment',
+            analysis_type=AnalysisJob.AnalysisType.MULTIPLE_SEQUENCE_ALIGNMENT,
+            parameters={
+                'artifact_id': str(normalized_fasta.id),
+                'strategy': parent.parameters['alignment_strategy'],
+                'threads': parent.parameters['threads'],
+            },
+        )
+        add_event(
+            parent,
+            'workflow_step_completed',
+            'Workflow validation step completed',
+            {'child_job_id': str(validation.id)},
+        )
+    if alignment.status != AnalysisJob.Status.SUCCEEDED:
+        _set_workflow_wait(parent, stage='waiting_alignment', progress=40)
+        return parent.status
+
+    aligned_fasta = alignment.artifacts.filter(kind='aligned_fasta').first()
+    if aligned_fasta is None:
+        _fail_job(
+            parent,
+            'WORKFLOW_ARTIFACT_MISSING',
+            'Alignment step did not produce aligned_fasta',
+        )
+        return AnalysisJob.Status.FAILED
+    tree = children.get('tree')
+    if tree is None:
+        tree, _ = create_workflow_child(
+            parent,
+            step='tree',
+            analysis_type=AnalysisJob.AnalysisType.PHYLOGENETIC_TREE,
+            parameters={
+                'artifact_id': str(aligned_fasta.id),
+                'model': parent.parameters['tree_model'],
+                'threads': parent.parameters['threads'],
+            },
+        )
+        add_event(
+            parent,
+            'workflow_step_completed',
+            'Workflow alignment step completed',
+            {'child_job_id': str(alignment.id)},
+        )
+    if tree.status != AnalysisJob.Status.SUCCEEDED:
+        _set_workflow_wait(parent, stage='waiting_tree', progress=75)
+        return parent.status
+
+    tree_artifact = tree.artifacts.filter(kind='phylogenetic_tree_newick').first()
+    if tree_artifact is None:
+        _fail_job(
+            parent,
+            'WORKFLOW_ARTIFACT_MISSING',
+            'Tree step did not produce phylogenetic_tree_newick',
+        )
+        return AnalysisJob.Status.FAILED
+
+    with transaction.atomic():
+        locked_parent = AnalysisJob.objects.select_for_update().get(id=parent.id)
+        if locked_parent.status == AnalysisJob.Status.CANCELLED:
+            return locked_parent.status
+        locked_parent.result = {
+            'workflow': 'sequence_phylogeny',
+            'steps': [
+                {
+                    'step': child.workflow_step,
+                    'job_id': str(child.id),
+                    'analysis_type': child.analysis_type,
+                    'status': child.status,
+                }
+                for child in (validation, alignment, tree)
+            ],
+            'summary': {
+                'record_count': validation.result.get('summary', {}).get(
+                    'record_count'
+                ),
+                'alphabet': validation.result.get('summary', {}).get('alphabet'),
+                'alignment_length': alignment.result.get('summary', {}).get(
+                    'alignment_length'
+                ),
+                'leaf_count': tree.result.get('summary', {}).get('leaf_count'),
+            },
+            'final_artifact': artifact_payload(tree_artifact),
+        }
+        locked_parent.status = AnalysisJob.Status.SUCCEEDED
+        locked_parent.stage = 'completed'
+        locked_parent.progress = 100
+        locked_parent.finished_at = timezone.now()
+        locked_parent.lease_expires_at = None
+        locked_parent.save(
+            update_fields=[
+                'result',
+                'status',
+                'stage',
+                'progress',
+                'finished_at',
+                'lease_expires_at',
+                'updated_at',
+            ]
+        )
+        add_event(
+            locked_parent,
+            'job_succeeded',
+            'Sequence phylogeny workflow completed',
+            {'tree_job_id': str(tree.id)},
+        )
+    return AnalysisJob.Status.SUCCEEDED
+
+
+def advance_waiting_workflows() -> dict:
+    now = timezone.now()
+    candidate_ids = list(
+        AnalysisJob.objects.filter(
+            analysis_type=AnalysisJob.AnalysisType.SEQUENCE_PHYLOGENY,
+            status=AnalysisJob.Status.WAITING_DEPENDENCY,
+        )
+        .filter(Q(lease_expires_at__isnull=True) | Q(lease_expires_at__lte=now))
+        .order_by('updated_at')
+        .values_list('id', flat=True)[: settings.WORKFLOW_ADVANCE_BATCH_SIZE]
+    )
+    claimed_ids = []
+    lease = now + timedelta(seconds=settings.WORKFLOW_LEASE_SECONDS)
+    for job_id in candidate_ids:
+        claimed = AnalysisJob.objects.filter(
+            id=job_id,
+            status=AnalysisJob.Status.WAITING_DEPENDENCY,
+        ).filter(
+            Q(lease_expires_at__isnull=True) | Q(lease_expires_at__lte=now)
+        ).update(lease_expires_at=lease)
+        if claimed:
+            claimed_ids.append(job_id)
+
+    completed = 0
+    failed = 0
+    for job in AnalysisJob.objects.filter(id__in=claimed_ids):
+        try:
+            status = _advance_sequence_phylogeny(job)
+        except Exception as exc:
+            job.refresh_from_db()
+            _fail_job(
+                job,
+                'WORKFLOW_ADVANCE_FAILED',
+                'Unable to advance sequence phylogeny workflow',
+                exc,
+            )
+            failed += 1
+            continue
+        if status == AnalysisJob.Status.SUCCEEDED:
+            completed += 1
+        elif status == AnalysisJob.Status.FAILED:
+            failed += 1
+    return {
+        'checked': len(claimed_ids),
+        'completed': completed,
+        'failed': failed,
+    }
 
 
 def poll_waiting_external_jobs() -> dict:

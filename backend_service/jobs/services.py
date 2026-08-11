@@ -19,6 +19,7 @@ TERMINAL_STATUSES = {
     AnalysisJob.Status.FAILED,
     AnalysisJob.Status.CANCELLED,
 }
+WORKFLOW_STEPS = ('validation', 'alignment', 'tree')
 
 
 class IdempotencyConflictError(ValueError):
@@ -61,6 +62,8 @@ def create_analysis_job(
     parameters: dict[str, Any],
     *,
     idempotency_key: str = '',
+    parent_job: AnalysisJob | None = None,
+    workflow_step: str = '',
 ) -> tuple[AnalysisJob, bool]:
     if analysis_type not in AnalysisJob.AnalysisType.values:
         raise ValueError(f'unsupported analysis type: {analysis_type}')
@@ -153,6 +156,48 @@ def create_analysis_job(
             'model': model,
             'threads': threads,
         }
+    elif analysis_type == AnalysisJob.AnalysisType.SEQUENCE_PHYLOGENY:
+        input_artifact_id = str(parameters.get('input_artifact_id', '')).strip()
+        try:
+            parsed_artifact_id = uuid.UUID(input_artifact_id)
+        except ValueError as exc:
+            raise ValueError('input_artifact_id must be a valid UUID') from exc
+        input_artifact = InputArtifact.objects.filter(
+            id=parsed_artifact_id,
+            kind='fasta_input',
+        ).first()
+        if input_artifact is None:
+            raise ValueError('FASTA input artifact was not found')
+        alphabet = str(parameters.get('alphabet', 'auto')).strip().lower()
+        if alphabet not in {'auto', 'dna', 'protein'}:
+            raise ValueError('alphabet must be one of: auto, dna, protein')
+        alignment_strategy = str(
+            parameters.get('alignment_strategy', 'auto')
+        ).strip().lower()
+        if alignment_strategy not in {'auto', 'linsi', 'ginsi', 'einsi'}:
+            raise ValueError(
+                'alignment_strategy must be one of: auto, einsi, ginsi, linsi'
+            )
+        tree_model = str(parameters.get('tree_model', 'auto')).strip().lower()
+        if tree_model not in {'auto', 'jc', 'gtr', 'jtt', 'wag', 'lg'}:
+            raise ValueError(
+                'tree_model must be one of: auto, gtr, jc, jtt, lg, wag'
+            )
+        try:
+            threads = int(parameters.get('threads', settings.MAFFT_DEFAULT_THREADS))
+        except (TypeError, ValueError) as exc:
+            raise ValueError('threads must be an integer') from exc
+        if not 1 <= threads <= settings.MAX_TOOL_THREADS:
+            raise ValueError(
+                f'threads must be between 1 and {settings.MAX_TOOL_THREADS}'
+            )
+        normalized_parameters = {
+            'input_artifact_id': str(input_artifact.id),
+            'alphabet': alphabet,
+            'alignment_strategy': alignment_strategy,
+            'tree_model': tree_model,
+            'threads': threads,
+        }
 
     normalized_idempotency_key = idempotency_key.strip()
     if len(normalized_idempotency_key) > 128:
@@ -168,6 +213,18 @@ def create_analysis_job(
                     'idempotency key was already used with different parameters'
                 )
             return existing_job, False
+    normalized_workflow_step = workflow_step.strip()
+    if parent_job is not None:
+        if normalized_workflow_step not in WORKFLOW_STEPS:
+            raise ValueError('workflow_step is required for child jobs')
+        existing_child = AnalysisJob.objects.filter(
+            parent_job=parent_job,
+            workflow_step=normalized_workflow_step,
+        ).first()
+        if existing_child is not None:
+            return existing_child, False
+    elif normalized_workflow_step:
+        raise ValueError('parent_job is required when workflow_step is set')
 
     active_count = AnalysisJob.objects.exclude(status__in=TERMINAL_STATUSES).count()
     if active_count >= settings.MAX_ACTIVE_JOBS:
@@ -179,9 +236,19 @@ def create_analysis_job(
                 analysis_type=analysis_type,
                 parameters=normalized_parameters,
                 idempotency_key=normalized_idempotency_key,
+                parent_job=parent_job,
+                workflow_step=normalized_workflow_step,
             )
             add_event(job, 'job_created', 'Analysis job created')
     except IntegrityError:
+        if parent_job is not None and normalized_workflow_step:
+            return (
+                AnalysisJob.objects.get(
+                    parent_job=parent_job,
+                    workflow_step=normalized_workflow_step,
+                ),
+                False,
+            )
         if not normalized_idempotency_key:
             raise
         existing_job = AnalysisJob.objects.get(
@@ -193,6 +260,51 @@ def create_analysis_job(
                 'idempotency key was already used with different parameters'
             ) from None
         return existing_job, False
+
+    if analysis_type == AnalysisJob.AnalysisType.SEQUENCE_PHYLOGENY:
+        job.status = AnalysisJob.Status.WAITING_DEPENDENCY
+        job.stage = 'waiting_validation'
+        job.progress = 0
+        job.save(
+            update_fields=['status', 'stage', 'progress', 'updated_at']
+        )
+        add_event(job, 'workflow_started', 'Sequence phylogeny workflow started')
+        try:
+            create_workflow_child(
+                job,
+                step='validation',
+                analysis_type=AnalysisJob.AnalysisType.FASTA_VALIDATION,
+                parameters={
+                    'input_artifact_id': normalized_parameters['input_artifact_id'],
+                    'alphabet': normalized_parameters['alphabet'],
+                },
+            )
+        except Exception as exc:
+            job.status = AnalysisJob.Status.FAILED
+            job.stage = 'failed'
+            job.error_code = 'WORKFLOW_START_FAILED'
+            job.error_message = 'Unable to start sequence validation step'
+            from django.utils import timezone
+
+            job.finished_at = timezone.now()
+            job.save(
+                update_fields=[
+                    'status',
+                    'stage',
+                    'error_code',
+                    'error_message',
+                    'finished_at',
+                    'updated_at',
+                ]
+            )
+            add_event(
+                job,
+                'workflow_start_failed',
+                job.error_message,
+                {'exception_type': type(exc).__name__},
+            )
+            raise RuntimeError(job.error_message) from exc
+        return job, True
 
     try:
         queue_options = {
@@ -237,6 +349,37 @@ def create_analysis_job(
     job.save(update_fields=['queue_task_id', 'updated_at'])
     add_event(job, 'job_queued', 'Analysis job queued with django-q2')
     return job, True
+
+
+def create_workflow_child(
+    parent_job: AnalysisJob,
+    *,
+    step: str,
+    analysis_type: str,
+    parameters: dict[str, Any],
+) -> tuple[AnalysisJob, bool]:
+    if step not in WORKFLOW_STEPS:
+        raise ValueError(f'unsupported workflow step: {step}')
+    existing = AnalysisJob.objects.filter(
+        parent_job=parent_job,
+        workflow_step=step,
+    ).first()
+    if existing is not None:
+        return existing, False
+    child, created = create_analysis_job(
+        analysis_type,
+        parameters,
+        parent_job=parent_job,
+        workflow_step=step,
+    )
+    if created:
+        add_event(
+            parent_job,
+            'workflow_step_started',
+            f'Workflow step {step} started',
+            {'child_job_id': str(child.id), 'analysis_type': analysis_type},
+        )
+    return child, created
 
 
 def create_fasta_input(
@@ -359,6 +502,9 @@ def cancel_analysis_job(job: AnalysisJob) -> AnalysisJob:
                 'removed_from_queue': removed_from_queue,
             },
         )
+        if locked_job.analysis_type == AnalysisJob.AnalysisType.SEQUENCE_PHYLOGENY:
+            for child in locked_job.child_jobs.exclude(status__in=TERMINAL_STATUSES):
+                cancel_analysis_job(child)
     return locked_job
 
 
@@ -406,9 +552,22 @@ def job_payload(job: AnalysisJob, include_result: bool = False) -> dict[str, Any
             'code': job.error_code,
             'message': job.error_message,
         }
+    if job.analysis_type == AnalysisJob.AnalysisType.SEQUENCE_PHYLOGENY:
+        payload['workflow_steps'] = [
+            {
+                'step': child.workflow_step,
+                'job_id': str(child.id),
+                'analysis_type': child.analysis_type,
+                'status': child.status,
+                'stage': child.stage,
+                'progress': child.progress,
+            }
+            for child in job.child_jobs.all().order_by('created_at')
+        ]
     if include_result:
         payload['result'] = job.result
-        payload['artifacts'] = [
-            artifact_payload(artifact) for artifact in job.artifacts.all()
-        ]
+        artifacts = job.artifacts.all()
+        if job.analysis_type == AnalysisJob.AnalysisType.SEQUENCE_PHYLOGENY:
+            artifacts = Artifact.objects.filter(job__parent_job=job)
+        payload['artifacts'] = [artifact_payload(artifact) for artifact in artifacts]
     return payload

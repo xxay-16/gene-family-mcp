@@ -184,6 +184,44 @@ class BackendClientTests(TestCase):
         )
 
     @patch('mcp_server.backend_client.request.urlopen')
+    def test_sequence_phylogeny_uploads_once_and_creates_parent_job(
+        self,
+        urlopen_mock,
+    ):
+        urlopen_mock.side_effect = [
+            _Response({'input_artifact_id': 'input-phylogeny'}),
+            _Response({'job_id': 'workflow-job', 'status': 'waiting_dependency'}),
+        ]
+        client = BackendClient('http://backend.test/api')
+
+        result = client.submit_sequence_phylogeny(
+            '>a\nACGT\n>b\nACGA\n>c\nTCGA\n',
+            alphabet='dna',
+            alignment_strategy='linsi',
+            tree_model='gtr',
+            threads=4,
+            filename='family.fa',
+            idempotency_key='workflow-key',
+        )
+
+        self.assertEqual(result['job_id'], 'workflow-job')
+        job_request = urlopen_mock.call_args_list[1].args[0]
+        self.assertEqual(
+            json.loads(job_request.data),
+            {
+                'analysis_type': 'sequence_phylogeny',
+                'parameters': {
+                    'input_artifact_id': 'input-phylogeny',
+                    'alphabet': 'dna',
+                    'alignment_strategy': 'linsi',
+                    'tree_model': 'gtr',
+                    'threads': 4,
+                },
+            },
+        )
+        self.assertEqual(job_request.headers['Idempotency-key'], 'workflow-key')
+
+    @patch('mcp_server.backend_client.request.urlopen')
     def test_backend_http_error_is_structured(self, urlopen_mock):
         from urllib.error import HTTPError
 
@@ -219,6 +257,7 @@ class MCPToolTests(TestCase):
     @patch.object(server.backend, 'submit_fasta_validation')
     @patch.object(server.backend, 'submit_multiple_sequence_alignment')
     @patch.object(server.backend, 'submit_phylogenetic_tree')
+    @patch.object(server.backend, 'submit_sequence_phylogeny')
     @patch.object(server.backend, 'get_job')
     @patch.object(server.backend, 'get_job_result')
     @patch.object(server.backend, 'cancel_job')
@@ -227,6 +266,7 @@ class MCPToolTests(TestCase):
         cancel_mock,
         result_mock,
         status_mock,
+        workflow_mock,
         tree_mock,
         alignment_mock,
         fasta_mock,
@@ -236,6 +276,7 @@ class MCPToolTests(TestCase):
         fasta_mock.return_value = {'job_id': 'job-2'}
         alignment_mock.return_value = {'job_id': 'job-3'}
         tree_mock.return_value = {'job_id': 'job-4'}
+        workflow_mock.return_value = {'job_id': 'job-5'}
         status_mock.return_value = {'status': 'queued'}
         result_mock.return_value = {'result': {}}
         cancel_mock.return_value = {'status': 'cancelled'}
@@ -261,6 +302,18 @@ class MCPToolTests(TestCase):
             server.build_phylogenetic_tree('artifact-2', 'gtr', 4, 'key-4'),
             {'job_id': 'job-4'},
         )
+        self.assertEqual(
+            server.run_sequence_phylogeny(
+                '>a\nACGT\n>b\nACGA\n>c\nTCGA\n',
+                'dna',
+                'linsi',
+                'gtr',
+                4,
+                'family.fa',
+                'key-5',
+            ),
+            {'job_id': 'job-5'},
+        )
         self.assertEqual(server.get_job_status('job-1'), {'status': 'queued'})
         self.assertEqual(server.get_job_result('job-1'), {'result': {}})
         self.assertEqual(server.cancel_job('job-1'), {'status': 'cancelled'})
@@ -282,4 +335,13 @@ class MCPToolTests(TestCase):
             'gtr',
             4,
             'key-4',
+        )
+        workflow_mock.assert_called_once_with(
+            '>a\nACGT\n>b\nACGA\n>c\nTCGA\n',
+            'dna',
+            'linsi',
+            'gtr',
+            4,
+            'family.fa',
+            'key-5',
         )

@@ -12,11 +12,13 @@ class AnalysisJob(models.Model):
             'Multiple sequence alignment',
         )
         PHYLOGENETIC_TREE = 'phylogenetic_tree', 'Phylogenetic tree'
+        SEQUENCE_PHYLOGENY = 'sequence_phylogeny', 'Sequence phylogeny workflow'
 
     class Status(models.TextChoices):
         QUEUED = 'queued', 'Queued'
         RUNNING = 'running', 'Running'
         WAITING_EXTERNAL = 'waiting_external', 'Waiting for external result'
+        WAITING_DEPENDENCY = 'waiting_dependency', 'Waiting for dependency'
         SUCCEEDED = 'succeeded', 'Succeeded'
         FAILED = 'failed', 'Failed'
         CANCELLED = 'cancelled', 'Cancelled'
@@ -41,6 +43,14 @@ class AnalysisJob(models.Model):
     external_deadline = models.DateTimeField(null=True, blank=True, db_index=True)
     last_polled_at = models.DateTimeField(null=True, blank=True)
     lease_expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    parent_job = models.ForeignKey(
+        'self',
+        on_delete=models.CASCADE,
+        related_name='child_jobs',
+        null=True,
+        blank=True,
+    )
+    workflow_step = models.CharField(max_length=64, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
@@ -53,7 +63,13 @@ class AnalysisJob(models.Model):
                 fields=['analysis_type', 'idempotency_key'],
                 condition=~models.Q(idempotency_key=''),
                 name='unique_analysis_idempotency_key',
-            )
+            ),
+            models.UniqueConstraint(
+                fields=['parent_job', 'workflow_step'],
+                condition=models.Q(parent_job__isnull=False)
+                & ~models.Q(workflow_step=''),
+                name='unique_workflow_job_step',
+            ),
         ]
 
 

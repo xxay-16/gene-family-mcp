@@ -95,6 +95,7 @@ Compose 将 `/data/artifacts` 挂载到 `artifact-data` volume。输入和输出
 - `Q_CLUSTER_RETRY` 必须严格大于普通与 MAFFT task timeout；配置不安全时后端会拒绝启动。
 - PlantCARE 外部等待不占用 worker。
 - 迁移自动创建 `gene-family-poll-external-results` Schedule，每分钟批量检查邮箱。
+- 迁移自动创建 `gene-family-advance-workflows` Schedule，每分钟推进已满足依赖的工作流父任务。
 - 任务与轮询均使用租约，避免多 worker 重复处理；过期运行租约会被标记为 `WORKER_LEASE_EXPIRED`。
 
 ## 7. 日志
@@ -146,6 +147,10 @@ docker compose logs --tail 200 worker
 ### 任务一直 waiting_external
 
 检查邮箱配置、IMAP 网络、Schedule 日志以及 `external_deadline`。临时 IMAP 错误会保留等待状态并在下一轮重试。
+
+### 任务一直 waiting_dependency
+
+查询父任务 `workflow_steps`，再检查对应子任务状态、worker 日志和 `gene-family-advance-workflows` Schedule。子任务成功后最迟在下一次一分钟调度中推进。
 
 ### Artifact 下载 404
 

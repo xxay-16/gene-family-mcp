@@ -12,7 +12,11 @@ from django_q.signing import SignedPackage
 
 from .models import AnalysisEvent, AnalysisJob, Artifact
 from .services import create_analysis_job, create_fasta_input
-from .tasks import execute_analysis_job, poll_waiting_external_jobs
+from .tasks import (
+    advance_waiting_workflows,
+    execute_analysis_job,
+    poll_waiting_external_jobs,
+)
 
 
 class JobAPITests(TestCase):
@@ -847,3 +851,225 @@ class JobExecutionTests(TestCase):
         job.refresh_from_db()
         self.assertEqual(result['status'], AnalysisJob.Status.FAILED)
         self.assertEqual(job.error_code, 'CAPABILITY_UNAVAILABLE')
+
+    @patch('jobs.services.async_task', side_effect=['validation-q', 'alignment-q', 'tree-q'])
+    def test_sequence_phylogeny_workflow_advances_and_aggregates_result(
+        self,
+        async_task_mock,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir)
+            with override_settings(ARTIFACT_ROOT=artifact_root):
+                input_artifact, _ = create_fasta_input(
+                    '>gene1\nACGT\n>gene2\nACGA\n>gene3\nTCGA\n'
+                )
+                parent, created = create_analysis_job(
+                    AnalysisJob.AnalysisType.SEQUENCE_PHYLOGENY,
+                    {
+                        'input_artifact_id': str(input_artifact.id),
+                        'alphabet': 'auto',
+                        'alignment_strategy': 'linsi',
+                        'tree_model': 'gtr',
+                        'threads': 2,
+                    },
+                )
+                validation = parent.child_jobs.get(workflow_step='validation')
+                validation.status = AnalysisJob.Status.SUCCEEDED
+                validation.result = {
+                    'summary': {'record_count': 3, 'alphabet': 'dna'}
+                }
+                validation.save(update_fields=['status', 'result', 'updated_at'])
+                normalized_path = artifact_root / str(validation.id) / 'normalized.fasta'
+                normalized_path.parent.mkdir(parents=True)
+                normalized_path.write_text(
+                    '>gene1\nACGT\n>gene2\nACGA\n>gene3\nTCGA\n',
+                    encoding='utf-8',
+                )
+                normalized = Artifact.objects.create(
+                    job=validation,
+                    kind='normalized_fasta',
+                    filename='normalized.fasta',
+                    storage_path=str(normalized_path.relative_to(artifact_root)),
+                    media_type='text/x-fasta',
+                    size=normalized_path.stat().st_size,
+                    sha256=hashlib.sha256(normalized_path.read_bytes()).hexdigest(),
+                    metadata={'alphabet': 'dna'},
+                )
+
+                first_advance = advance_waiting_workflows()
+                alignment = parent.child_jobs.get(workflow_step='alignment')
+                self.assertEqual(
+                    alignment.parameters,
+                    {
+                        'artifact_id': str(normalized.id),
+                        'strategy': 'linsi',
+                        'threads': 2,
+                    },
+                )
+                alignment.status = AnalysisJob.Status.SUCCEEDED
+                alignment.result = {
+                    'summary': {
+                        'record_count': 3,
+                        'alphabet': 'dna',
+                        'alignment_length': 4,
+                    }
+                }
+                alignment.save(update_fields=['status', 'result', 'updated_at'])
+                aligned_path = artifact_root / str(alignment.id) / 'aligned.fasta'
+                aligned_path.parent.mkdir(parents=True)
+                aligned_path.write_text(
+                    '>gene1\nACGT\n>gene2\nACGA\n>gene3\nTCGA\n',
+                    encoding='utf-8',
+                )
+                aligned = Artifact.objects.create(
+                    job=alignment,
+                    kind='aligned_fasta',
+                    filename='aligned.fasta',
+                    storage_path=str(aligned_path.relative_to(artifact_root)),
+                    media_type='text/x-fasta',
+                    size=aligned_path.stat().st_size,
+                    sha256=hashlib.sha256(aligned_path.read_bytes()).hexdigest(),
+                    metadata={'alphabet': 'dna'},
+                )
+
+                second_advance = advance_waiting_workflows()
+                tree = parent.child_jobs.get(workflow_step='tree')
+                self.assertEqual(tree.parameters['artifact_id'], str(aligned.id))
+                tree.status = AnalysisJob.Status.SUCCEEDED
+                tree.result = {'summary': {'leaf_count': 3}}
+                tree.save(update_fields=['status', 'result', 'updated_at'])
+                tree_path = artifact_root / str(tree.id) / 'tree.newick'
+                tree_path.parent.mkdir(parents=True)
+                tree_path.write_text(
+                    '(gene1:0.1,gene2:0.2,gene3:0.3);\n',
+                    encoding='utf-8',
+                )
+                tree_artifact = Artifact.objects.create(
+                    job=tree,
+                    kind='phylogenetic_tree_newick',
+                    filename='tree.newick',
+                    storage_path=str(tree_path.relative_to(artifact_root)),
+                    media_type='text/x-newick',
+                    size=tree_path.stat().st_size,
+                    sha256=hashlib.sha256(tree_path.read_bytes()).hexdigest(),
+                )
+
+                third_advance = advance_waiting_workflows()
+                parent.refresh_from_db()
+                result_response = self.client.get(
+                    f'/api/jobs/{parent.id}/result'
+                )
+
+        self.assertTrue(created)
+        self.assertEqual(first_advance['checked'], 1)
+        self.assertEqual(second_advance['checked'], 1)
+        self.assertEqual(third_advance['completed'], 1)
+        self.assertEqual(parent.status, AnalysisJob.Status.SUCCEEDED)
+        self.assertEqual(parent.result['summary']['leaf_count'], 3)
+        self.assertEqual(
+            parent.result['final_artifact']['artifact_id'],
+            str(tree_artifact.id),
+        )
+        self.assertEqual(result_response.status_code, 200)
+        self.assertEqual(len(result_response.json()['artifacts']), 3)
+        self.assertEqual(async_task_mock.call_count, 3)
+
+    @patch('jobs.services.async_task', return_value='validation-q')
+    def test_sequence_phylogeny_propagates_child_failure(self, _async_task_mock):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with override_settings(ARTIFACT_ROOT=Path(temp_dir)):
+                input_artifact, _ = create_fasta_input('>a\nACGT\n>b\nACGA\n>c\nTCGA\n')
+                parent, _ = create_analysis_job(
+                    AnalysisJob.AnalysisType.SEQUENCE_PHYLOGENY,
+                    {
+                        'input_artifact_id': str(input_artifact.id),
+                        'alphabet': 'dna',
+                        'alignment_strategy': 'auto',
+                        'tree_model': 'auto',
+                        'threads': 1,
+                    },
+                )
+                validation = parent.child_jobs.get(workflow_step='validation')
+                validation.status = AnalysisJob.Status.FAILED
+                validation.error_code = 'INVALID_FASTA'
+                validation.save(
+                    update_fields=['status', 'error_code', 'updated_at']
+                )
+
+                advance_waiting_workflows()
+
+        parent.refresh_from_db()
+        self.assertEqual(parent.status, AnalysisJob.Status.FAILED)
+        self.assertEqual(parent.error_code, 'WORKFLOW_STEP_FAILED')
+        self.assertIn('INVALID_FASTA', parent.error_message)
+
+    @patch('jobs.services.async_task', return_value='validation-q')
+    def test_cancelling_workflow_cancels_active_child(self, _async_task_mock):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with override_settings(ARTIFACT_ROOT=Path(temp_dir)):
+                input_artifact, _ = create_fasta_input('>a\nACGT\n>b\nACGA\n>c\nTCGA\n')
+                parent, _ = create_analysis_job(
+                    AnalysisJob.AnalysisType.SEQUENCE_PHYLOGENY,
+                    {
+                        'input_artifact_id': str(input_artifact.id),
+                        'alphabet': 'dna',
+                        'alignment_strategy': 'auto',
+                        'tree_model': 'auto',
+                        'threads': 1,
+                    },
+                )
+                child = parent.child_jobs.get(workflow_step='validation')
+
+                response = self.client.post(f'/api/jobs/{parent.id}/cancel')
+
+        parent.refresh_from_db()
+        child.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(parent.status, AnalysisJob.Status.CANCELLED)
+        self.assertEqual(child.status, AnalysisJob.Status.CANCELLED)
+
+    def test_workflow_schedule_is_installed_by_migration(self):
+        schedule = Schedule.objects.get(name='gene-family-advance-workflows')
+        self.assertEqual(schedule.func, 'jobs.tasks.advance_waiting_workflows')
+        self.assertEqual(schedule.schedule_type, Schedule.MINUTES)
+        self.assertEqual(schedule.minutes, 1)
+        self.assertEqual(schedule.repeats, -1)
+
+    @patch('jobs.services.async_task', return_value='validation-q')
+    def test_sequence_phylogeny_idempotency_reuses_parent_and_child(
+        self,
+        async_task_mock,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with override_settings(ARTIFACT_ROOT=Path(temp_dir)):
+                input_artifact, _ = create_fasta_input(
+                    '>a\nACGT\n>b\nACGA\n>c\nTCGA\n'
+                )
+                parameters = {
+                    'input_artifact_id': str(input_artifact.id),
+                    'alphabet': 'dna',
+                    'alignment_strategy': 'auto',
+                    'tree_model': 'auto',
+                    'threads': 1,
+                }
+                first, first_created = create_analysis_job(
+                    AnalysisJob.AnalysisType.SEQUENCE_PHYLOGENY,
+                    parameters,
+                    idempotency_key='workflow-idempotency',
+                )
+                second, second_created = create_analysis_job(
+                    AnalysisJob.AnalysisType.SEQUENCE_PHYLOGENY,
+                    parameters,
+                    idempotency_key='workflow-idempotency',
+                )
+                status_response = self.client.get(f'/api/jobs/{first.id}')
+
+        self.assertTrue(first_created)
+        self.assertFalse(second_created)
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(first.child_jobs.count(), 1)
+        self.assertEqual(async_task_mock.call_count, 1)
+        self.assertEqual(
+            status_response.json()['workflow_steps'][0]['step'],
+            'validation',
+        )
