@@ -1,4 +1,6 @@
-# ninja_service
+# Legacy Django prototype
+
+> 这是 Gene Family MCP 项目中现有的 PlantCARE/Django 原型，不是最终 MCP Server。项目定位、目标架构和迁移计划请先阅读仓库根目录的 [`README.md`](../README.md) 与 [`docs/architecture.md`](../docs/architecture.md)。
 
 基于 Django + Django Ninja + django-q2 的服务骨架，默认使用 SQLite。
 
