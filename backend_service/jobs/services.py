@@ -40,7 +40,12 @@ def add_event(
     )
 
 
-def create_analysis_job(analysis_type: str, parameters: dict[str, Any]) -> AnalysisJob:
+def create_analysis_job(
+    analysis_type: str,
+    parameters: dict[str, Any],
+    *,
+    idempotency_key: str = '',
+) -> tuple[AnalysisJob, bool]:
     if analysis_type != AnalysisJob.AnalysisType.CIS_ELEMENTS:
         raise ValueError(f'unsupported analysis type: {analysis_type}')
 
@@ -49,10 +54,22 @@ def create_analysis_job(analysis_type: str, parameters: dict[str, Any]) -> Analy
         str(parameters.get('sequence', ''))
     )
 
+    normalized_idempotency_key = idempotency_key.strip()
+    if len(normalized_idempotency_key) > 128:
+        raise ValueError('idempotency key must be at most 128 characters')
+    if normalized_idempotency_key:
+        existing_job = AnalysisJob.objects.filter(
+            analysis_type=analysis_type,
+            idempotency_key=normalized_idempotency_key,
+        ).first()
+        if existing_job is not None:
+            return existing_job, False
+
     with transaction.atomic():
         job = AnalysisJob.objects.create(
             analysis_type=analysis_type,
             parameters=normalized_parameters,
+            idempotency_key=normalized_idempotency_key,
         )
         add_event(job, 'job_created', 'Analysis job created')
 
@@ -88,7 +105,7 @@ def create_analysis_job(analysis_type: str, parameters: dict[str, Any]) -> Analy
     job.queue_task_id = queue_task_id
     job.save(update_fields=['queue_task_id', 'updated_at'])
     add_event(job, 'job_queued', 'Analysis job queued with django-q2')
-    return job
+    return job, True
 
 
 def _delete_queued_task(queue_task_id: str) -> bool:

@@ -16,9 +16,10 @@ class SequenceIn(Schema):
 @router.post('/submit', response={202: dict})
 def submit_sequence(request, payload: SequenceIn):
     try:
-        job = create_analysis_job(
+        job, created = create_analysis_job(
             AnalysisJob.AnalysisType.CIS_ELEMENTS,
             {'sequence': payload.sequence},
+            idempotency_key=request.headers.get('Idempotency-Key', ''),
         )
     except ValueError as exc:
         return Response(
@@ -33,6 +34,7 @@ def submit_sequence(request, payload: SequenceIn):
     return 202, {
         **job_payload(job),
         'task_id': str(job.id),
+        'created': created,
     }
 
 

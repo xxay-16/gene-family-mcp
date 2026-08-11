@@ -30,6 +30,7 @@ python -m venv venv
 ```powershell
 $env:GENE_FAMILY_BACKEND_URL = "http://127.0.0.1:8000/api"
 $env:GENE_FAMILY_BACKEND_TIMEOUT = "30"
+$env:GENE_FAMILY_BACKEND_TOKEN = "replace-with-a-random-token"
 ```
 
 ## 启动

@@ -226,6 +226,7 @@ sequenceDiagram
 - MCP Server 可与客户端同机，通过 HTTPS 调用远程后端。
 - Backend 使用 PostgreSQL、独立 worker 和对象存储。
 - API 增加认证、速率限制和任务配额。
+- 当前已支持后端 Bearer Token、请求 ID 和任务幂等键；速率限制与配额仍待实现。
 - provider 密钥只存在于后端。
 
 ## 12. 当前风险

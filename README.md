@@ -62,6 +62,8 @@ MCP 协议适配层，供 Codex、Claude Desktop 等 MCP 客户端连接。
 | `GET` | `/api/core/capabilities` | 分析能力与执行后端 |
 | `POST` | `/api/jobs` | 创建通用分析任务 |
 | `GET` | `/api/jobs/{job_id}` | 查询业务任务 |
+| `GET` | `/api/jobs?status=queued&limit=50` | 按状态列出任务 |
+| `GET` | `/api/jobs/{job_id}/events` | 查询状态与 provider 事件 |
 | `GET` | `/api/jobs/{job_id}/result` | 获取结果与产物清单 |
 | `POST` | `/api/jobs/{job_id}/cancel` | 取消任务 |
 | `GET` | `/api/artifacts/{artifact_id}/download` | 下载产物 |
@@ -112,6 +114,7 @@ python -m venv venv
 $env:PLANTCARE_EMAIL = "your-email@qq.com"
 $env:PLANTCARE_AUTH_CODE = "your-imap-auth-code"
 $env:PLANTCARE_IMAP_HOST = "imap.qq.com"
+$env:BACKEND_API_TOKEN = "replace-with-a-random-token"
 ```
 
 ### 3. 启动后端 API
@@ -139,10 +142,13 @@ Set-Location .\backend_service
 
 ```powershell
 $env:GENE_FAMILY_BACKEND_URL = "http://127.0.0.1:8000/api"
+$env:GENE_FAMILY_BACKEND_TOKEN = "replace-with-a-random-token"
 .\venv\Scripts\python.exe -m mcp_server.server
 ```
 
 MCP Server 默认使用 `stdio` transport。客户端配置时，命令应指向虚拟环境 Python，参数为 `-m mcp_server.server`，工作目录为仓库根目录。
+
+提交工具支持可选 `idempotency_key`。相同分析类型和幂等键会返回原业务任务，不会重复提交 django-q2 或 PlantCARE。
 
 ## API 示例
 
@@ -191,6 +197,7 @@ flowchart LR
 - [x] 将 PlantCARE 长时间邮箱等待改为 django-q2 Schedule 周期检查。
 - [x] 使用业务 UUID 和持久化状态解决任务查询问题。
 - [ ] 为 MCP 与后端通信增加认证、稳定错误码和超时策略。
+- [x] 增加后端 Bearer Token、MCP 凭据转发、请求 ID 与幂等提交。
 - [ ] 增加单元测试、API 集成测试和 MCP 工具测试。
 - [ ] 增加 FASTA 资源上传与 artifact 下载 API。
 - [x] 安全解析 PlantCARE 归档与 `.tab`，生成结构化 JSON Artifact。

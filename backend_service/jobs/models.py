@@ -30,6 +30,7 @@ class AnalysisJob(models.Model):
     error_code = models.CharField(max_length=64, blank=True)
     error_message = models.TextField(blank=True)
     queue_task_id = models.CharField(max_length=64, blank=True, db_index=True)
+    idempotency_key = models.CharField(max_length=128, blank=True, db_index=True)
     provider_ref = models.CharField(max_length=128, blank=True, db_index=True)
     external_deadline = models.DateTimeField(null=True, blank=True, db_index=True)
     last_polled_at = models.DateTimeField(null=True, blank=True)
@@ -40,6 +41,13 @@ class AnalysisJob(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['analysis_type', 'idempotency_key'],
+                condition=~models.Q(idempotency_key=''),
+                name='unique_analysis_idempotency_key',
+            )
+        ]
 
 
 class AnalysisEvent(models.Model):

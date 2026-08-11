@@ -26,9 +26,12 @@ class BackendClientTests(TestCase):
         urlopen_mock.return_value = _Response(
             {'job_id': 'job-123', 'status': 'queued'}
         )
-        client = BackendClient('http://backend.test/api')
+        client = BackendClient(
+            'http://backend.test/api',
+            token='backend-secret',
+        )
 
-        result = client.submit_cis_element_analysis('ACGT')
+        result = client.submit_cis_element_analysis('ACGT', 'request-123')
 
         self.assertEqual(result['job_id'], 'job-123')
         api_request = urlopen_mock.call_args.args[0]
@@ -40,6 +43,11 @@ class BackendClientTests(TestCase):
                 'parameters': {'sequence': 'ACGT'},
             },
         )
+        self.assertEqual(
+            api_request.headers['Authorization'],
+            'Bearer backend-secret',
+        )
+        self.assertEqual(api_request.headers['Idempotency-key'], 'request-123')
 
     @patch('mcp_server.backend_client.request.urlopen')
     def test_job_operations_use_stable_contract(self, urlopen_mock):

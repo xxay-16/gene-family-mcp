@@ -20,13 +20,16 @@ def get_capabilities() -> dict:
 
 
 @mcp.tool()
-def submit_cis_element_analysis(sequence: str) -> dict:
+def submit_cis_element_analysis(
+    sequence: str,
+    idempotency_key: str = '',
+) -> dict:
     """Submit a DNA promoter sequence for PlantCARE cis-element analysis.
 
     The backend accepts A, C, G, T and N characters. The operation is
     asynchronous and returns a stable job_id for later status queries.
     """
-    return backend.submit_cis_element_analysis(sequence)
+    return backend.submit_cis_element_analysis(sequence, idempotency_key)
 
 
 @mcp.tool()

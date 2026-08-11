@@ -97,20 +97,62 @@ class JobAPITests(TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()['error']['code'], 'JOB_NOT_FOUND')
 
+    def test_list_and_event_audit_endpoints(self):
+        job = AnalysisJob.objects.create(
+            analysis_type=AnalysisJob.AnalysisType.CIS_ELEMENTS,
+            parameters={'sequence': 'ACGT'},
+        )
+        AnalysisEvent.objects.create(
+            job=job,
+            event_type='job_created',
+            message='created',
+        )
+
+        list_response = self.client.get('/api/jobs?status=queued&limit=10')
+        event_response = self.client.get(f'/api/jobs/{job.id}/events')
+
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(list_response.json()['jobs'][0]['job_id'], str(job.id))
+        self.assertEqual(event_response.status_code, 200)
+        self.assertEqual(
+            event_response.json()['events'][0]['event_type'],
+            'job_created',
+        )
+
 
 class JobExecutionTests(TestCase):
     def test_business_job_is_enqueued_in_django_q2(self):
-        job = create_analysis_job(
+        job, created = create_analysis_job(
             AnalysisJob.AnalysisType.CIS_ELEMENTS,
             {'sequence': 'ACGT'},
         )
 
+        self.assertTrue(created)
         queued = OrmQ.objects.get()
         payload = SignedPackage.loads(queued.payload)
         self.assertEqual(payload['func'], 'jobs.tasks.execute_analysis_job')
         self.assertEqual(payload['args'], (str(job.id),))
         self.assertEqual(payload['id'], job.queue_task_id)
         self.assertFalse(payload['save'])
+
+    @patch('jobs.services.async_task', return_value='q2-task-idempotent')
+    def test_idempotency_key_reuses_business_job(self, async_task_mock):
+        first_job, first_created = create_analysis_job(
+            AnalysisJob.AnalysisType.CIS_ELEMENTS,
+            {'sequence': 'ACGT'},
+            idempotency_key='request-123',
+        )
+        second_job, second_created = create_analysis_job(
+            AnalysisJob.AnalysisType.CIS_ELEMENTS,
+            {'sequence': 'TTTT'},
+            idempotency_key='request-123',
+        )
+
+        self.assertTrue(first_created)
+        self.assertFalse(second_created)
+        self.assertEqual(first_job.id, second_job.id)
+        self.assertEqual(first_job.parameters['sequence'], 'ACGT')
+        async_task_mock.assert_called_once()
 
     def test_poll_schedule_is_installed_by_migration(self):
         schedule = Schedule.objects.get(name='gene-family-poll-external-results')

@@ -20,6 +20,7 @@ Gene Family MCP 的 API 与任务执行后端，基于 Django、Django Ninja 和
 | `GET` | `/api/core/capabilities` | 查询分析能力和队列后端 |
 | `POST` | `/api/jobs` | 创建业务任务 |
 | `GET` | `/api/jobs/{job_id}` | 查询任务状态 |
+| `GET` | `/api/jobs/{job_id}/events` | 查询任务事件 |
 | `GET` | `/api/jobs/{job_id}/result` | 获取结果和产物清单 |
 | `POST` | `/api/jobs/{job_id}/cancel` | 取消任务 |
 | `GET` | `/api/artifacts/{artifact_id}/download` | 下载分析产物 |
@@ -42,7 +43,10 @@ python -m venv venv
 $env:PLANTCARE_EMAIL = "your-email@qq.com"
 $env:PLANTCARE_AUTH_CODE = "your-imap-auth-code"
 $env:PLANTCARE_IMAP_HOST = "imap.qq.com"
+$env:BACKEND_API_TOKEN = "replace-with-a-random-token"
 ```
+
+配置 `BACKEND_API_TOKEN` 后，除健康检查和 OpenAPI 文档之外的 `/api/` 接口都要求 `Authorization: Bearer <token>`。未配置时仅适合本地开发。创建任务可携带 `Idempotency-Key` 请求头，避免客户端重试导致重复分析。
 
 ## 启动 API
 

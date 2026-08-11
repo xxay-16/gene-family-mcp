@@ -52,6 +52,8 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'core.middleware.RequestIdMiddleware',
+    'core.middleware.BackendTokenMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
@@ -148,6 +150,7 @@ PLANTCARE_ARCHIVE_MAX_TOTAL_SIZE = int(
     os.getenv('PLANTCARE_ARCHIVE_MAX_TOTAL_SIZE', str(100 * 1024 * 1024))
 )
 ARTIFACT_ROOT = Path(os.getenv('ARTIFACT_ROOT', BASE_DIR / 'artifacts')).resolve()
+BACKEND_API_TOKEN = os.getenv('BACKEND_API_TOKEN', '').strip()
 
 SECURE_PROXY_SSL_HEADER = (
     ('HTTP_X_FORWARDED_PROTO', 'https')

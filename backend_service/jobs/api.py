@@ -24,12 +24,32 @@ def _error(code: str, message: str, status: int):
 @router.post('', response={202: dict})
 def create_job(request, payload: JobCreateIn):
     try:
-        job = create_analysis_job(payload.analysis_type, payload.parameters)
+        job, created = create_analysis_job(
+            payload.analysis_type,
+            payload.parameters,
+            idempotency_key=request.headers.get('Idempotency-Key', ''),
+        )
     except ValueError as exc:
         return _error('INVALID_INPUT', str(exc), 422)
     except RuntimeError as exc:
         return _error('QUEUE_UNAVAILABLE', str(exc), 503)
-    return 202, job_payload(job)
+    response = job_payload(job)
+    response['created'] = created
+    return 202, response
+
+
+@router.get('')
+def list_jobs(request, status: str | None = None, limit: int = 50):
+    limit = min(max(limit, 1), 200)
+    jobs = AnalysisJob.objects.all()
+    if status:
+        if status not in AnalysisJob.Status.values:
+            return _error('INVALID_STATUS', f'Unknown job status: {status}', 422)
+        jobs = jobs.filter(status=status)
+    return {
+        'jobs': [job_payload(job) for job in jobs[:limit]],
+        'limit': limit,
+    }
 
 
 @router.get('/{job_id}')
@@ -39,6 +59,26 @@ def get_job(request, job_id: UUID):
     except AnalysisJob.DoesNotExist:
         return _error('JOB_NOT_FOUND', 'Analysis job not found', 404)
     return job_payload(job)
+
+
+@router.get('/{job_id}/events')
+def get_job_events(request, job_id: UUID):
+    try:
+        job = AnalysisJob.objects.get(id=job_id)
+    except AnalysisJob.DoesNotExist:
+        return _error('JOB_NOT_FOUND', 'Analysis job not found', 404)
+    return {
+        'job_id': str(job.id),
+        'events': [
+            {
+                'event_type': event.event_type,
+                'message': event.message,
+                'details': event.details,
+                'created_at': event.created_at.isoformat(),
+            }
+            for event in job.events.all()
+        ],
+    }
 
 
 @router.get('/{job_id}/result')
