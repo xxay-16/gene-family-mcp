@@ -1,111 +1,109 @@
-# Gene Family MCP 架构设计与现状评估
+# Gene Family MCP 架构
 
-## 1. 文档目的
+## 1. 架构结论
 
-本文档重新定义仓库的系统边界：它不是单一 PlantCARE 自动化脚本，而是一个面向 MCP 客户端的基因家族分析平台。现有代码作为可迁移资产保留，但目标架构不应继续围绕 Django view、django-q2 内部表或邮箱轮询组织。
+系统固定分为两块：
 
-## 2. 现状结论
+1. `mcp_server`：MCP 协议服务。
+2. `backend_service`：HTTP API、任务编排、分析执行和数据存储。
 
-### 2.1 可复用资产
+不建设独立前端。Django 只提供 API，不提供模板页面或 Admin 页面。
 
-- PlantCARE multipart 请求构造逻辑。
-- 任务随机 `ref` 与邮件匹配思路。
-- MIME 正文解析和附件保存逻辑。
-- Django Ninja API、SQLite 和 django-q2 的最小运行骨架。
-- 已成功下载过的 PlantCARE 结果样例，可用于后续解析器 fixture。
+```mermaid
+flowchart LR
+    CLIENT["MCP Client"] -->|"stdio"| MCP["mcp_server"]
+    MCP -->|"HTTP / JSON"| API["backend_service API"]
+    API --> DB["业务数据库"]
+    API --> QUEUE["任务队列"]
+    QUEUE --> WORKER["分析 worker"]
+    WORKER --> PROVIDERS["PlantCARE / BLAST / HMMER / MAFFT / IQ-TREE"]
+    WORKER --> ARTIFACTS["分析产物存储"]
+    WORKER --> DB
+```
 
-### 2.2 主要结构性问题
+## 2. 为什么必须分开
 
-#### 任务生命周期不属于业务层
+MCP 是面向 Agent 的协议边界，后端是面向分析任务的业务边界。两者生命周期和扩展方式不同：
 
-当前 API 直接读取 `Success`、`Failure` 和 `OrmQ`。这让对外状态语义依赖队列库内部实现，也无法表示 `submitted_to_provider`、`waiting_external_result`、`parsing` 等业务阶段。
+- MCP Server 应轻量、启动快、无状态。
+- 后端需要持久化任务、运行 worker、管理密钥和调用分析工具。
+- MCP 客户端不应知道 django-q2、数据库表或 PlantCARE 邮箱。
+- 后端可以独立测试、部署、扩容，并服务其他 API 客户端。
+- 将来替换 Django、队列或某个 provider 时，不需要改变 MCP tool schema。
 
-#### 队列超时与外部等待不匹配
+## 3. `mcp_server` 边界
 
-worker 超时为 90 秒，PlantCARE 邮件轮询最长为 1800 秒。任务可能被杀死和重复投递，进而重复提交远程任务。现有数据库中已经出现大量重试记录。
+### 允许承担
 
-#### worker 承担长轮询
+- MCP tools/resources 注册。
+- MCP 输入 schema 和简单参数规范化。
+- 后端 API client。
+- 后端错误到 MCP 错误的映射。
+- 对 Agent 友好的工具说明和结构化输出。
 
-每个分析任务都占用一个 worker 保持 IMAP 连接并 `sleep`。当 worker 数量为 2 时，两条等待邮件的任务即可耗尽全部执行容量。
+### 禁止承担
 
-#### 状态查询不可靠
+- 直接导入 Django model。
+- 直接读取 SQLite/PostgreSQL。
+- 直接启动 django-q2 任务。
+- 保存邮箱授权码。
+- 直接轮询 IMAP 或调用 PlantCARE。
+- 执行 BLAST、HMMER、MAFFT 等本地程序。
+- 保存分析结果文件。
 
-django-q2 的 `OrmQ.payload` 是编码后的序列化内容，无法用 `payload__contains=task_id` 稳定查询。不存在的 ID 目前也会被返回为 `processing`。
+## 4. `backend_service` 边界
 
-#### 缺少业务实体和溯源
+后端按内部职责继续分层：
 
-目前没有持久化的分析任务、输入、参数、产物、事件和 provider 请求记录。结果仅作为队列返回值和本地文件路径存在。
+```text
+backend_service/
+├── api              请求校验、响应 schema、认证
+├── application      用例服务和工作流编排
+├── domain           任务、序列、结果、产物领域模型
+├── providers        PlantCARE 和本地生信工具适配器
+├── jobs             队列、worker、scheduler
+├── storage          数据库 repository 与 artifact store
+└── scripts          独立诊断工具
+```
 
-#### 领域逻辑与基础设施耦合
+当前 Django app 尚未完成上述内部重构，但新增业务能力必须按此边界实现，不能继续把 HTTP、IMAP、文件系统和工作流堆在同一个函数中。
 
-PlantCARE HTTP、IMAP、文件系统、Django settings 和任务主流程集中在一个模块中，难以模拟、测试或替换。
+## 5. 服务间 API 契约
 
-#### 安全边界不足
+MCP Server 只能依赖稳定的公开 API，不依赖后端内部队列表。
 
-- 邮件附件名未规范化，存在目录穿越风险。
-- 序列只有非空校验。
-- 没有输入长度、任务配额和并发限制。
-- Django 使用开发密钥和 `DEBUG=True`。
-- 失败结果可能直接向用户暴露本地路径和 traceback。
+建议逐步统一为：
 
-### 2.3 组件处置建议
-
-| 现有组件 | 决策 | 原因 |
+| 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| PlantCARE 请求与邮件解析 | 拆分后保留 | 已验证外部调用链，是顺式元件模块的可用基础 |
-| Django ORM | 保留 | 适合承载任务、产物、事件及管理后台 |
-| Django Ninja | 作为可选 HTTP 接口保留 | 便于网页和非 MCP 客户端调用，但不再承载领域逻辑 |
-| django-q2 | 暂时保留、通过接口隔离 | 原型可继续运行；后续是否替换不应影响应用层 |
-| SQLite | 仅限本地开发 | 多 worker、并发写入和生产可靠性有限 |
-| `test.py` / `plantcare_submit.py` | 迁移为 CLI 与测试 fixture | 避免与正式 provider 维持两套重复实现 |
-| 当前预测网页 | 降级为开发演示界面 | 不是 MCP 核心能力，可在稳定 API 之上继续维护 |
-| `core` 示例任务 | 删除或改为真正的系统诊断 | 当前示例不属于基因家族业务 |
+| `GET` | `/api/core/health` | 健康检查 |
+| `GET` | `/api/capabilities` | 工具、数据库和版本能力 |
+| `POST` | `/api/jobs` | 创建通用分析任务 |
+| `GET` | `/api/jobs/{job_id}` | 查询任务状态 |
+| `POST` | `/api/jobs/{job_id}/cancel` | 取消任务 |
+| `GET` | `/api/jobs/{job_id}/result` | 获取结构化结果 |
+| `GET` | `/api/artifacts/{artifact_id}` | 下载分析产物 |
 
-## 3. 推荐的系统边界
+当前 `/api/cis-elements/*` 可以继续作为过渡 API，待通用任务 API 成熟后兼容或迁移。
 
-采用模块化单体，在一个 Python 项目内保持四个清晰边界。
+## 6. 业务任务模型
 
-### 3.1 领域层
+不能继续用 django-q2 的内部 `Success`、`Failure`、`OrmQ` 直接充当公开任务模型。应建立 `AnalysisJob`：
 
-不依赖 Django、MCP SDK、队列或具体工具，包含：
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 对外稳定 UUID |
+| `analysis_type` | 分析类型 |
+| `status` | 业务状态 |
+| `stage` | 当前工作流阶段 |
+| `parameters` | 规范化参数 |
+| `progress` | 可选进度 |
+| `error_code` | 稳定错误码 |
+| `error_message` | 对用户安全的错误说明 |
+| `queue_task_id` | 可替换的内部队列 ID |
+| `created_at/started_at/finished_at` | 生命周期时间 |
 
-- `SequenceRecord`：序列 ID、字母表、类型、长度、校验结果。
-- `GeneFamilyDataset`：成员、物种、来源和输入产物。
-- `AnalysisJob`：业务级任务及状态机。
-- `Artifact`：文件产物的类型、位置、校验和、MIME 和大小。
-- `AnalysisResult`：结构化结果摘要与产物引用。
-- `Provenance`：工具、版本、参数、数据库和运行环境。
-
-### 3.2 应用层
-
-实现用例，不处理协议细节：
-
-- 校验/导入序列。
-- 创建分析任务。
-- 编排单步或多步家族工作流。
-- 查询、取消、重试任务。
-- 获取结果和产物。
-- 根据 provider 能力选择具体实现。
-
-### 3.3 接口层
-
-- MCP：tools、resources 和协议错误映射。
-- HTTP：浏览器、自动化脚本及运维接口。
-- CLI：开发、批处理和故障排查。
-
-接口层不得直接操作队列表，也不得包含生信分析实现。
-
-### 3.4 基础设施层
-
-- provider：PlantCARE、BLAST、HMMER、MAFFT、IQ-TREE/FastTree、MEME 等。
-- job backend：worker、scheduler 和队列实现。
-- persistence：Django ORM repository。
-- artifact store：本地目录或对象存储。
-- process runner：受限地执行本地生信命令。
-
-## 4. 任务状态模型
-
-建议使用显式状态机：
+推荐状态机：
 
 ```mermaid
 stateDiagram-v2
@@ -114,115 +112,79 @@ stateDiagram-v2
     running --> waiting_external
     waiting_external --> running
     running --> succeeded
-    queued --> cancelled
-    running --> cancelled
-    waiting_external --> cancelled
     queued --> failed
     running --> failed
     waiting_external --> failed
-    failed --> queued: explicit retry
+    queued --> cancelled
+    running --> cancelled
+    waiting_external --> cancelled
 ```
 
-状态含义：
+`waiting_external` 表示 PlantCARE 等外部任务已经提交但结果尚未返回。它不能占用普通分析 worker。
 
-- `queued`：已持久化，等待 worker。
-- `running`：正在执行本地步骤或提交远程请求。
-- `waiting_external`：远程任务已提交，等待邮件或远程状态变化，不占用普通 worker。
-- `succeeded`：结果完成并已持久化。
-- `failed`：终止失败，包含稳定错误码和可诊断信息。
-- `cancelled`：用户取消，不再调度后续步骤。
+## 7. 分析产物模型
 
-任务需要保存当前 `stage` 和可选 `progress`，例如 `homology_search`、`domain_validation`、`alignment`、`phylogeny`、`cis_elements`、`reporting`。
+大文件、图片和压缩包不应塞入任务 JSON。建立 `Artifact`：
 
-## 5. 核心数据模型
+- `id`
+- `job_id`
+- `kind`：FASTA、TSV、Newick、SVG、PNG、HTML report 等
+- `uri`
+- `sha256`
+- `media_type`
+- `size`
+- `metadata`
+- `created_at`
 
-### AnalysisJob
+MCP 结果只返回结构化摘要和 artifact ID；需要时再读取对应资源。
 
-| 字段 | 说明 |
-| --- | --- |
-| `id` | 稳定 UUID，作为 MCP `job_id` |
-| `analysis_type` | `cis_elements`、`gene_family_full` 等 |
-| `status` | 业务状态 |
-| `stage` | 当前工作流阶段 |
-| `input_manifest` | 输入 artifact 引用和摘要 |
-| `parameters` | 规范化后的参数 JSON |
-| `progress` | 0–100，可为空 |
-| `error_code` | 稳定机器可读错误码 |
-| `error_message` | 对用户安全的错误信息 |
-| `created_at/started_at/finished_at` | 生命周期时间 |
-| `attempt` | 显式重试次数 |
+## 8. PlantCARE 重构
 
-### Artifact
+现有 `run_prediction_task` 同时承担提交、等待、邮件解析和文件保存，需要拆成：
 
-| 字段 | 说明 |
-| --- | --- |
-| `id` | 稳定 UUID |
-| `job_id` | 所属任务 |
-| `kind` | `input_fasta`、`alignment`、`tree_newick`、`table_tsv`、`figure_svg`、`report` 等 |
-| `uri` | 存储位置，不直接信任用户路径 |
-| `sha256` | 内容校验和 |
-| `media_type` | MIME 类型 |
-| `size` | 文件大小 |
-| `metadata` | 行列数、序列数、图片尺寸等 |
-
-### AnalysisEvent
-
-追加式事件日志，记录状态变化、provider 请求、重试和解析结果。该表用于审计与排障，不替代任务当前状态。
-
-## 6. PlantCARE provider 重构
-
-PlantCARE 应拆成三个可独立测试的组件：
-
-1. `PlantCareSubmitter`：提交序列并返回外部 `ref`。
-2. `PlantCareInboxCollector`：一次性读取新邮件，提取候选消息，不在内部循环睡眠。
-3. `PlantCareResultParser`：安全解包附件，将 `.tab` 和 HTML 转为结构化结果。
-
-推荐流程：
+1. `PlantCareSubmitter`：提交序列，返回外部 `ref`。
+2. `PlantCareInboxCollector`：单次检查邮箱，不在内部 `sleep`。
+3. `PlantCareResultParser`：安全解包并解析 `.tab`/HTML。
+4. scheduler：周期性寻找 `waiting_external` 任务并检查结果。
 
 ```mermaid
 sequenceDiagram
-    participant U as MCP Client
-    participant A as Application Service
+    participant M as MCP Server
+    participant A as Backend API
     participant W as Worker
     participant P as PlantCARE
     participant S as Scheduler
-    participant M as Mailbox
+    participant E as Email
 
-    U->>A: submit_cis_element_analysis
-    A-->>U: job_id
+    M->>A: POST /api/jobs
+    A-->>M: job_id, queued
     W->>P: submit(sequence, ref)
-    W->>A: status = waiting_external
-    S->>M: collect mailbox once
-    M-->>S: matching message/ref
-    S->>W: enqueue parse job
-    W->>A: persist result and artifacts
-    U->>A: get_job_result(job_id)
-    A-->>U: structured result
+    W->>A: waiting_external
+    S->>E: collect once
+    E-->>S: matching result
+    S->>W: enqueue parse step
+    W->>A: succeeded + artifacts
+    M->>A: GET /api/jobs/{job_id}/result
 ```
 
-必须使用幂等键，确保任务重试时不会再次提交相同的 PlantCARE 请求。
+任务提交必须使用幂等键，防止 worker 重试时重复提交 PlantCARE。
 
-## 7. MCP 设计约束
+## 9. MCP tool 设计
 
-### 小型稳定 schema
+所有耗时工具立即返回 `job_id`。MCP 调用不能等待外部邮件或长时间命令完成。
 
-工具输入只接收业务参数，不暴露本地绝对路径、django-q2 参数或邮箱实现细节。
+建议 tools：
 
-### 长任务异步化
+- `backend_health`
+- `get_capabilities`
+- `validate_sequences`
+- `submit_cis_element_analysis`
+- `submit_gene_family_analysis`
+- `get_job_status`
+- `get_job_result`
+- `cancel_job`
 
-提交工具快速返回：
-
-```json
-{
-  "job_id": "uuid",
-  "status": "queued",
-  "status_resource": "gene-family://jobs/uuid"
-}
-```
-
-### 错误可判定
-
-建议错误码至少包括：
+后端统一错误码：
 
 - `INVALID_SEQUENCE`
 - `INPUT_TOO_LARGE`
@@ -234,105 +196,64 @@ sequenceDiagram
 - `ARTIFACT_NOT_FOUND`
 - `JOB_NOT_FOUND`
 
-### capabilities 可发现
+## 10. 基因家族后端模块
 
-不同部署可能没有安装相同的数据库和生信程序。客户端应能查询当前可用 provider、版本、支持的输入类型和限制。
+| 模块 | 典型后端 | 主要产物 |
+| --- | --- | --- |
+| 输入标准化 | Python/Biopython | 标准 FASTA、校验报告 |
+| 同源检索 | BLAST、DIAMOND | 候选成员 TSV |
+| 结构域验证 | HMMER、InterProScan | domain 命中表 |
+| 多序列比对 | MAFFT | aligned FASTA |
+| 系统发育 | IQ-TREE、FastTree | Newick、支持率表 |
+| 基因结构 | GFF/GTF parser | exon/intron 表与图 |
+| 保守基序 | MEME Suite | motif 表与图 |
+| 顺式元件 | PlantCARE provider | 元件表与汇总 |
+| 报告 | Python 模板/绘图 | JSON、HTML、PDF |
 
-## 8. 基因家族工作流的模块划分
+各步骤通过 artifact ID 传递输入输出，以支持缓存、单步重跑和断点恢复。
 
-| 模块 | 输入 | 主要输出 | 候选后端 |
-| --- | --- | --- | --- |
-| 序列标准化 | FASTA/ID | 标准 FASTA、校验报告 | Python/Biopython |
-| 同源检索 | 种子序列、数据库 | 候选成员表 | BLAST、DIAMOND |
-| 结构域验证 | 候选蛋白 | domain 命中表 | HMMER、InterProScan |
-| 多序列比对 | 家族蛋白 | aligned FASTA | MAFFT |
-| 系统发育 | alignment | Newick、支持率表 | IQ-TREE、FastTree |
-| 基因结构 | GFF/GTF、成员 ID | exon/intron 表与图 | Python parser |
-| 保守基序 | 家族蛋白 | motif 表与图 | MEME Suite |
-| 顺式元件 | 启动子序列 | 元件表与汇总 | PlantCARE provider |
-| 共线性 | 基因组与注释 | synteny pairs | MCScanX 等 |
-| 报告 | 全部结果 | HTML/PDF/JSON manifest | Python 模板与绘图 |
-
-每个步骤输出 artifact，后续步骤只引用 artifact ID。这样单步可以重跑，完整工作流也能断点恢复。
-
-## 9. 安全与运行约束
-
-- 所有上传文件和附件都使用服务端生成的文件名。
-- 解析归档前验证成员路径、数量、单文件大小和总解压大小。
-- 本地命令使用参数数组调用，禁止拼接 shell 字符串。
-- 限制序列条数、单序列长度、总碱基/氨基酸数和并发任务数。
-- worker 在独立工作目录运行，并对 CPU、内存、执行时间和磁盘配额设限。
-- MCP/HTTP 响应不暴露授权码、邮箱内容、绝对路径或完整 traceback。
-- 结果目录按任务隔离，产物下载经过 artifact repository 校验。
-
-## 10. 部署建议
+## 11. 部署模型
 
 ### 本地单用户
 
-- MCP `stdio` transport。
-- SQLite。
-- 本地 artifact 目录。
-- 单 worker。
+- MCP Server：`stdio`。
+- Backend API：localhost。
+- SQLite 和本地 artifact 目录。
+- 单 worker + scheduler。
 
-### 多用户或远程部署
+### 远程或多用户
 
-- MCP Streamable HTTP，并配置认证与反向代理。
-- PostgreSQL。
-- 独立 worker/scheduler。
-- 对象存储或受管共享存储。
-- 结构化日志、指标和任务告警。
+- MCP Server 可与客户端同机，通过 HTTPS 调用远程后端。
+- Backend 使用 PostgreSQL、独立 worker 和对象存储。
+- API 增加认证、速率限制和任务配额。
+- provider 密钥只存在于后端。
 
-不要让 Web/MCP 进程直接执行耗时生信命令。
+## 12. 当前风险
 
-## 11. 迁移顺序
+- PlantCARE 邮件轮询最长 30 分钟，django-q2 超时只有 90 秒。
+- worker 内长时间 `sleep` 会耗尽执行容量。
+- worker 已取走但未完成的任务缺少可靠公开状态。
+- 当前没有业务任务表和 artifact 表。
+- 当前自动化测试覆盖不足。
+- 生产配置仍需要关闭 `DEBUG`、外置 `SECRET_KEY` 并增加认证。
 
-### Phase 1：打基础
+## 13. 实施顺序
 
-- 建立 `pyproject.toml` 和 `src/gene_family_mcp`。
-- 定义领域模型、repository 接口和配置模型。
-- 实现 FASTA 校验与 MCP Server 最小闭环。
-- 为现有 PlantCARE 样例建立 fixtures。
+1. 完成两服务目录和 HTTP 边界。
+2. 建立 `AnalysisJob`、`Artifact`、`AnalysisEvent`。
+3. 重构 PlantCARE submitter、collector、parser。
+4. 建立 scheduler，移除 worker 内邮箱长轮询。
+5. 统一 `/api/jobs` 契约和 MCP tools。
+6. 增加测试和稳定错误码。
+7. 接入完整基因家族分析工具链。
 
-### Phase 2：迁移 PlantCARE
+## 14. 架构验收标准
 
-- 拆分 submitter、collector、parser。
-- 新建业务任务表与 artifact 表。
-- 将邮箱检查改为 scheduler 周期任务。
-- API/MCP 只读取业务任务状态。
-
-### Phase 3：家族核心流程
-
-- 接入 BLAST/DIAMOND、HMMER、MAFFT、IQ-TREE。
-- 实现工作流 DAG、缓存、断点恢复和产物 manifest。
-
-### Phase 4：扩展分析与报告
-
-- 基因结构、motif、顺式元件、共线性和表达分析。
-- 统一绘图和 HTML/PDF 报告。
-
-### Phase 5：生产化
-
-- PostgreSQL、认证、配额、对象存储和可观测性。
-- 完成安全审计、压力测试和发布流程。
-
-## 12. 当前不建议做的事情
-
-- 不要把每个底层命令都直接暴露为一个高自由度 MCP tool。
-- 不要把 MCP server 与 Django view 写在同一模块。
-- 不要使用队列库内部表作为用户可见任务模型。
-- 不要在 worker 内通过长时间 `sleep` 等待邮件。
-- 不要把大结果、图片或压缩包直接保存进任务 JSON。
-- 不要在缺少输入、版本和数据库记录的情况下生成“最终结论”。
-
-## 13. 架构验收标准
-
-进入功能扩展前，基础架构至少应满足：
-
-- MCP、HTTP 和 CLI 对同一输入产生一致任务。
-- 服务重启后任务和结果仍可查询。
-- 未知 `job_id` 明确返回 `JOB_NOT_FOUND`。
-- 外部等待不占用普通分析 worker。
-- 同一任务重试不会重复提交远程分析。
-- 所有产物有校验和、类型、来源和工具版本。
-- 单元测试无需真实网络和邮箱即可运行。
-- 失败响应不泄露密钥、本地绝对路径和 traceback。
+- MCP Server 不导入任何 Django 模块。
+- MCP Server 不读取后端数据库或 provider 密钥。
+- 后端没有 HTML 页面和模板路由。
+- 未知任务返回明确的 404/`JOB_NOT_FOUND`。
+- 外部等待不占用普通 worker。
+- 后端重启后任务和结果仍可查询。
+- 所有产物包含校验和、类型、来源和工具版本。
+- 单元测试无需真实网络或邮箱即可运行。

@@ -1,191 +1,101 @@
 # Gene Family MCP
 
-面向 AI Agent 的基因家族分析服务。项目目标是把序列校验、同源基因检索、结构域鉴定、多序列比对、系统发育树、基因结构、保守基序、启动子顺式作用元件和结果汇总封装为可组合、可追踪的 MCP（Model Context Protocol）工具。
+面向 AI Agent 的基因家族分析 MCP。仓库明确分成两个独立运行单元：
 
-> 当前状态：**架构重整阶段，尚未提供可连接的 MCP Server。** 仓库现有实现是一个 PlantCARE 顺式作用元件预测原型，包括命令行脚本、Django Ninja API、django-q2 异步任务和邮箱结果回收。它将作为未来基因家族工作流中的一个分析适配器继续演进。
-
-## 项目目标
-
-Gene Family MCP 不负责替 AI 做不可追溯的“黑盒结论”，而是为 Agent 提供标准化分析能力：
-
-- 接收 FASTA、基因 ID、基因组注释或已有分析结果。
-- 校验输入并记录参数、软件版本和数据来源。
-- 调度本地工具或远程生物信息学服务。
-- 用统一任务模型表示排队、运行、成功、失败和取消状态。
-- 将表格、树文件、图片和报告作为可下载、可复用的分析产物。
-- 通过 MCP tools/resources 向 Codex、Claude Desktop 等兼容客户端暴露能力。
-- 同一套业务逻辑可被 MCP、HTTP API 和命令行复用。
-
-## 计划覆盖的分析流程
-
-```mermaid
-flowchart LR
-    A["输入基因、蛋白或家族种子序列"] --> B["输入校验与标准化"]
-    B --> C["同源检索与候选成员筛选"]
-    C --> D["结构域与 HMM 验证"]
-    D --> E["多序列比对"]
-    E --> F["系统发育树构建"]
-    D --> G["基因结构与保守基序"]
-    D --> H["启动子与顺式作用元件"]
-    F --> I["家族统计、可视化与报告"]
-    G --> I
-    H --> I
+```text
+MCP Client  <──stdio──>  mcp_server  <──HTTP/JSON──>  backend_service
+                                                     ├── Django Ninja API
+                                                     ├── django-q2 worker
+                                                     ├── PlantCARE provider
+                                                     └── 分析结果存储
 ```
 
-建议分阶段实现，而不是一开始就把所有外部工具接入：
+当前实现首先提供 PlantCARE 启动子顺式作用元件预测，后续将逐步增加序列校验、同源检索、结构域鉴定、多序列比对、系统发育、保守基序和基因结构分析。
 
-1. 建立 MCP Server、统一任务模型、文件产物模型和序列校验。
-2. 将现有 PlantCARE 能力重构为独立 provider。
-3. 增加 BLAST/HMMER、MAFFT 和系统发育树工作流。
-4. 增加结构域、基因结构、MEME motif、共线性和表达分析。
-5. 生成带完整溯源信息的家族分析报告。
+> 当前状态：MCP 与后端的分层骨架已经建立，但 PlantCARE 异步任务模型仍是原型，完整基因家族分析工作流尚未实现。
 
-## 当前已经具备的能力
+## 两个服务的职责
 
-| 能力 | 状态 | 当前入口 | 说明 |
-| --- | --- | --- | --- |
-| PlantCARE 表单提交 | 原型可用 | `plantcare_submit.py` | 支持序列或 FASTA 文件 |
-| 邮箱轮询与附件下载 | 原型可用 | `test.py` | 通过 IMAP 匹配任务 `ref` |
-| Django 健康检查 | 可用 | `GET /api/core/health` | 返回服务状态 |
-| 顺式元件异步提交 | 原型 | `POST /api/cis-elements/submit` | 依赖 django-q2 和邮箱配置 |
-| 任务状态查询 | 需要修复 | `GET /api/cis-elements/tasks/{task_id}` | 当前队列状态识别不可靠 |
-| MCP Server | 未实现 | — | 下一阶段的首要工作 |
-| 完整基因家族分析 | 未实现 | — | 按路线图逐步接入 |
+### `mcp_server`
 
-## 架构重新评估
+MCP 协议适配层，供 Codex、Claude Desktop 等 MCP 客户端连接。
 
-### 现有架构
+它负责：
 
-```mermaid
-flowchart LR
-    UI["Django 页面"] --> API["Django Ninja API"]
-    API --> Q["django-q2 / SQLite"]
-    Q --> S["PlantCARE 提交与邮箱轮询"]
-    S --> P["PlantCARE"]
-    P --> M["结果邮件"]
-    M --> S
-    S --> FS["本地结果目录"]
-```
+- 注册 MCP tools。
+- 将工具调用转换成后端 HTTP 请求。
+- 返回结构化任务状态和结果。
+- 隐藏后端内部数据库、队列和 provider 实现。
 
-这个原型验证了 PlantCARE 的调用链，但不宜直接扩展成完整 MCP：
+它不直接访问数据库、邮箱、PlantCARE，也不执行生信程序。
 
-- MCP、HTTP、任务调度和 PlantCARE 细节尚未分层。
-- 一个 worker 会在 IMAP 轮询中阻塞最长 30 分钟，而队列任务超时只有 90 秒。
-- 任务状态依赖 django-q2 内部序列化字段，未知任务也会被显示为 `processing`。
-- 没有业务级任务表、产物表、输入溯源或结构化结果模型。
-- PlantCARE 邮件附件只保存路径，尚未解析成统一结果。
-- 当前没有自动化测试。
+当前 tools：
 
-### 推荐架构：模块化单体 + 独立 worker
+| Tool | 说明 |
+| --- | --- |
+| `backend_health` | 检查后端 API 是否可用 |
+| `submit_cis_element_analysis` | 提交 DNA 启动子序列分析 |
+| `get_cis_element_task` | 查询任务状态或结果 |
 
-初期不建议拆微服务。推荐保留 Python/Django 作为控制面，但让业务能力脱离 Django view 和 django-q2 数据模型：
+### `backend_service`
 
-```mermaid
-flowchart TB
-    subgraph Interfaces["接口层"]
-        MCP["MCP Server<br/>stdio / Streamable HTTP"]
-        HTTP["Django Ninja API"]
-        CLI["CLI"]
-    end
+无前端页面的 API 与任务后端。
 
-    subgraph Application["应用层"]
-        UC["用例服务"]
-        JM["统一任务管理"]
-        WF["基因家族工作流编排"]
-    end
+它负责：
 
-    subgraph Domain["领域层"]
-        SEQ["序列与基因家族模型"]
-        RESULT["结果、产物与溯源模型"]
-    end
+- Django Ninja REST API。
+- 输入校验、任务创建和状态查询。
+- django-q2 worker 与任务执行。
+- PlantCARE HTTP 提交、IMAP 邮件回收和附件保存。
+- 后续本地生信工具与分析工作流。
 
-    subgraph Infrastructure["基础设施层"]
-        WORKER["任务 Worker / Scheduler"]
-        DB["SQLite 开发 / PostgreSQL 生产"]
-        ART["本地或对象存储"]
-        PROVIDERS["BLAST · HMMER · MAFFT · PlantCARE · MEME"]
-    end
+当前 API：
 
-    MCP --> UC
-    HTTP --> UC
-    CLI --> UC
-    UC --> JM
-    UC --> WF
-    WF --> SEQ
-    WF --> RESULT
-    JM --> DB
-    JM --> WORKER
-    WORKER --> PROVIDERS
-    WORKER --> ART
-    WORKER --> DB
-```
-
-详细的架构问题、边界、数据模型和迁移方案见 [架构设计文档](docs/architecture.md)。
-
-## 建议的 MCP 能力
-
-MCP 接口应保持小而稳定，复杂工作流由服务端编排。首批建议提供：
-
-| MCP Tool | 用途 | 同步方式 |
+| 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `validate_sequences` | 校验并标准化 DNA/CDS/蛋白 FASTA | 同步 |
-| `submit_cis_element_analysis` | 提交启动子顺式作用元件分析 | 异步，返回 `job_id` |
-| `submit_gene_family_analysis` | 提交组合式家族分析流程 | 异步，返回 `job_id` |
-| `get_job_status` | 查询任务阶段、进度和错误 | 同步 |
-| `get_job_result` | 获取结构化结果和产物清单 | 同步 |
-| `cancel_job` | 取消尚未完成的任务 | 同步 |
+| `GET` | `/api/core/health` | 后端健康检查 |
+| `POST` | `/api/cis-elements/submit` | 提交顺式作用元件分析 |
+| `GET` | `/api/cis-elements/tasks/{task_id}` | 查询状态或结果 |
+| `GET` | `/api/docs` | OpenAPI 文档 |
 
-建议提供的 MCP resources：
+仓库不再提供 HTML 预测页面和 Django Admin 路由。
 
-- `gene-family://jobs/{job_id}`：任务元数据和当前状态。
-- `gene-family://jobs/{job_id}/result`：结构化结果。
-- `gene-family://artifacts/{artifact_id}`：FASTA、TSV、Newick、SVG、PNG 或报告。
-- `gene-family://capabilities`：已安装分析后端、版本和限制。
-
-所有耗时工具都应立即返回 `job_id`，不应让一次 MCP 调用持续等待外部网站邮件或长时间命令执行。
-
-## 推荐目录结构
-
-下面是目标结构，不代表当前仓库已经完成迁移：
+## 目录结构
 
 ```text
 gene-family-mcp/
-├── README.md
-├── pyproject.toml
+├── mcp_server/
+│   ├── server.py             # MCP tools 和 stdio 入口
+│   ├── backend_client.py     # 后端 HTTP client
+│   ├── settings.py           # MCP 侧配置
+│   └── requirements.txt
+├── backend_service/
+│   ├── config/               # Django 配置与 API 路由
+│   ├── core/                 # 健康检查等基础 API
+│   ├── cis_elements/         # PlantCARE API 与 provider 原型
+│   ├── scripts/              # PlantCARE 独立调试脚本
+│   ├── tests/fixtures/       # 测试输入
+│   ├── manage.py
+│   └── requirements.txt
 ├── docs/
-│   └── architecture.md
-├── src/gene_family_mcp/
-│   ├── domain/               # 序列、任务、结果、产物等纯领域模型
-│   ├── application/          # 用例服务与工作流编排
-│   ├── providers/            # PlantCARE、BLAST、HMMER、MAFFT 等适配器
-│   ├── jobs/                 # 队列、worker、调度和状态机
-│   ├── storage/              # 数据库与产物存储
-│   ├── interfaces/
-│   │   ├── mcp/              # MCP tools/resources/server
-│   │   ├── http/             # 可选 HTTP API
-│   │   └── cli/              # 命令行入口
-│   └── settings.py
-├── tests/
-│   ├── unit/
-│   ├── integration/
-│   └── fixtures/
-└── legacy/                   # 迁移完成前保存现有原型入口
+│   ├── architecture.md       # 架构边界与演进方案
+│   └── plantcare-cli.md      # 独立脚本使用说明
+└── README.md
 ```
 
-## 当前原型的本地运行
+## 快速开始
 
-### 1. 创建环境
-
-当前依赖文件位于 `ninja_service/requirements.txt`：
+### 1. 创建虚拟环境
 
 ```powershell
 python -m venv venv
-.\venv\Scripts\python.exe -m pip install -r .\ninja_service\requirements.txt
+.\venv\Scripts\python.exe -m pip install -r .\backend_service\requirements.txt
+.\venv\Scripts\python.exe -m pip install -r .\mcp_server\requirements.txt
 ```
 
 ### 2. 配置 PlantCARE 邮箱
 
-应使用邮箱授权码，不要使用网页登录密码：
+使用邮箱 IMAP 授权码，不要使用网页登录密码：
 
 ```powershell
 $env:PLANTCARE_EMAIL = "your-email@qq.com"
@@ -193,72 +103,93 @@ $env:PLANTCARE_AUTH_CODE = "your-imap-auth-code"
 $env:PLANTCARE_IMAP_HOST = "imap.qq.com"
 ```
 
-不要把授权码写入源码或提交到 Git。
-
-### 3. 初始化并启动 Django
-
-分别打开两个终端：
+### 3. 启动后端 API
 
 ```powershell
-Set-Location .\ninja_service
+Set-Location .\backend_service
 ..\venv\Scripts\python.exe manage.py migrate
 ..\venv\Scripts\python.exe manage.py runserver
 ```
 
+后端默认地址为 `http://127.0.0.1:8000/api`。
+
+### 4. 启动 worker
+
+在第二个终端执行：
+
 ```powershell
-Set-Location .\ninja_service
+Set-Location .\backend_service
 ..\venv\Scripts\python.exe manage.py qcluster
 ```
 
-可访问：
+### 5. 启动 MCP Server
 
-- 顺式元件预测页面：`http://127.0.0.1:8000/cis-elements/`
-- OpenAPI 文档：`http://127.0.0.1:8000/api/docs`
-- 健康检查：`http://127.0.0.1:8000/api/core/health`
+在第三个终端回到仓库根目录：
 
-> 注意：当前队列超时和轮询模型尚未整改，Web 预测流程只适合开发验证。独立脚本用法见 [PlantCARE 使用文档](使用文档.md)。
+```powershell
+$env:GENE_FAMILY_BACKEND_URL = "http://127.0.0.1:8000/api"
+.\venv\Scripts\python.exe -m mcp_server.server
+```
 
-## 配置原则
+MCP Server 默认使用 `stdio` transport。客户端配置时，命令应指向虚拟环境 Python，参数为 `-m mcp_server.server`，工作目录为仓库根目录。
 
-- 密钥只通过环境变量或密钥管理服务注入。
-- 每个 provider 独立配置超时、重试和并发限制。
-- 每次分析记录输入摘要、参数、工具版本、数据库版本和运行日志。
-- 开发环境可以使用 SQLite；多 worker 或生产部署改用 PostgreSQL。
-- 分析产物不要直接塞入任务表，应保存到独立 artifact store。
+## API 示例
 
-## 测试策略
+提交分析：
 
-当前测试数量为 0。重构时至少需要：
+```powershell
+$body = @{ sequence = "ACGTACGTNNACGT" } | ConvertTo-Json
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8000/api/cis-elements/submit `
+  -ContentType application/json `
+  -Body $body
+```
 
-- 领域层单元测试：FASTA 解析、序列类型识别、参数校验、任务状态转换。
-- provider 契约测试：用固定响应模拟 PlantCARE、BLAST/HMMER 等外部依赖。
-- 任务集成测试：提交、执行、失败、超时、重试、取消和结果恢复。
-- MCP 协议测试：工具 schema、错误响应、资源读取和长任务轮询。
-- 安全测试：附件路径穿越、超大输入、非法字符和敏感信息泄漏。
+查询状态：
 
-测试不应依赖真实邮箱或真实 PlantCARE 服务；在线端到端测试应单独标记并由显式配置启用。
+```powershell
+Invoke-RestMethod `
+  -Uri http://127.0.0.1:8000/api/cis-elements/tasks/<task_id>
+```
 
-## 近期路线图
+## 目标分析流程
 
-- [ ] 建立 `pyproject.toml`、`src/` 布局和统一配置。
-- [ ] 定义 `AnalysisJob`、`Artifact`、`AnalysisEvent` 数据模型。
-- [ ] 实现基础 MCP Server 和 `validate_sequences`。
-- [ ] 将 PlantCARE 提交、邮件回收和结果解析拆成 provider。
-- [ ] 使用调度任务检查邮箱，移除 worker 内长时间 `sleep`。
-- [ ] 修复任务状态机、超时、幂等性和重试策略。
-- [ ] 增加单元与集成测试。
-- [ ] 接入 BLAST/HMMER、MAFFT 和系统发育树流程。
-- [ ] 输出标准 TSV/JSON/Newick/图片及可复现报告。
+```mermaid
+flowchart LR
+    A["输入序列或基因 ID"] --> B["标准化与校验"]
+    B --> C["同源检索"]
+    C --> D["结构域验证"]
+    D --> E["多序列比对"]
+    E --> F["系统发育树"]
+    D --> G["基因结构与保守基序"]
+    D --> H["启动子顺式元件"]
+    F --> I["家族结果与报告"]
+    G --> I
+    H --> I
+```
 
-## 设计原则
+后端负责执行和持久化这一流程；MCP 只提供稳定、面向 Agent 的工具接口。
 
-1. **可复现**：任何结论都能追溯到输入、参数、版本和产物。
-2. **异步优先**：外部服务和生信工具都是任务，不阻塞 MCP 会话。
-3. **接口与实现解耦**：MCP、HTTP、CLI 共用同一应用服务。
-4. **provider 可替换**：远程 PlantCARE 与未来本地实现可以替换或并存。
-5. **结构化结果优先**：原始文件保留，但 Agent 首先获得稳定 JSON schema。
-6. **失败可诊断**：区分输入错误、依赖缺失、远程服务失败、超时和系统错误。
+## 下一阶段
+
+- [ ] 建立业务级 `AnalysisJob`、`Artifact` 和 `AnalysisEvent` 表。
+- [ ] 将 PlantCARE 长时间邮箱等待改为 scheduler 周期检查。
+- [ ] 解决运行中任务无法可靠查询的问题。
+- [ ] 为 MCP 与后端通信增加认证、稳定错误码和超时策略。
+- [ ] 增加单元测试、API 集成测试和 MCP 工具测试。
+- [ ] 增加 FASTA 资源上传与 artifact 下载 API。
+- [ ] 接入 BLAST/DIAMOND、HMMER、MAFFT 和 IQ-TREE。
+
+更详细的状态模型、数据模型和迁移计划见 [架构文档](docs/architecture.md)。
+
+## 安全说明
+
+- 不要提交邮箱授权码和 `.env`。
+- MCP Server 不应接触 provider 密钥。
+- 后端响应不应暴露邮箱正文、绝对路径或完整 traceback。
+- 正式部署需要关闭 Django `DEBUG`、设置随机密钥并增加 API 认证。
 
 ## License
 
-仓库目前尚未添加开源许可证。正式公开或接受外部贡献前，应明确许可证，并核对所调用数据库、远程服务和第三方分析工具的使用条款。
+项目尚未添加开源许可证。公开发布前需要明确许可证，并核对 PlantCARE 及后续生信工具和数据库的使用条款。

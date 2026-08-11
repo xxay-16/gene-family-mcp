@@ -110,7 +110,8 @@ def parse_args():
     parser.add_argument("--submit-url", default=PLANTCARE_URL)
     parser.add_argument("--ref", default="")
     parser.add_argument("--sequence", default="")
-    parser.add_argument("--file", dest="file_path", default="test.fa")
+    default_fasta = Path(__file__).resolve().parent.parent / 'tests' / 'fixtures' / 'test.fa'
+    parser.add_argument("--file", dest="file_path", default=str(default_fasta))
     parser.add_argument("--submit-timeout", type=int, default=120)
     parser.add_argument("--poll-interval", type=int, default=10)
     parser.add_argument("--max-polls", type=int, default=60)
