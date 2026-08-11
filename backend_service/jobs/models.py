@@ -11,6 +11,7 @@ class AnalysisJob(models.Model):
             'multiple_sequence_alignment',
             'Multiple sequence alignment',
         )
+        PHYLOGENETIC_TREE = 'phylogenetic_tree', 'Phylogenetic tree'
 
     class Status(models.TextChoices):
         QUEUED = 'queued', 'Queued'

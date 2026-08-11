@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends mafft \
+    && apt-get install -y --no-install-recommends fasttree mafft \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend_service/requirements.txt /app/backend_service/requirements.txt

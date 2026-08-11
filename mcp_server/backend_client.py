@@ -149,5 +149,22 @@ class BackendClient:
             idempotency_key=idempotency_key,
         )
 
+    def submit_phylogenetic_tree(
+        self,
+        artifact_id: str,
+        model: str = 'auto',
+        threads: int = 2,
+        idempotency_key: str = '',
+    ) -> dict[str, Any]:
+        return self.create_job(
+            'phylogenetic_tree',
+            {
+                'artifact_id': artifact_id,
+                'model': model,
+                'threads': threads,
+            },
+            idempotency_key=idempotency_key,
+        )
+
     def get_task_status(self, task_id: str) -> dict[str, Any]:
         return self.get_job(task_id)

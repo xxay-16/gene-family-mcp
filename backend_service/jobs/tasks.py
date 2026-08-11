@@ -14,12 +14,14 @@ from django.db.models import Q
 from django.utils import timezone
 
 from .fasta import parse_and_normalize_fasta, summarize_fasta_alignment
+from .local_tools.fasttree import run_fasttree
 from .local_tools.mafft import (
     ToolExecutionError,
     ToolUnavailableError,
     run_mafft,
 )
 from .models import AnalysisJob, Artifact
+from .newick import summarize_newick
 from .services import add_event, artifact_payload
 
 
@@ -409,6 +411,117 @@ def _execute_multiple_sequence_alignment(job: AnalysisJob) -> dict:
     return {'job_id': str(job.id), 'status': AnalysisJob.Status.SUCCEEDED}
 
 
+def _execute_phylogenetic_tree(job: AnalysisJob) -> dict:
+    if not _set_state(job, AnalysisJob.Status.RUNNING, 'running_fasttree', 20):
+        return {'job_id': str(job.id), 'status': job.status}
+    source_artifact = Artifact.objects.select_related('job').get(
+        id=job.parameters['artifact_id'],
+        kind='aligned_fasta',
+        job__status=AnalysisJob.Status.SUCCEEDED,
+    )
+    source_summary = source_artifact.job.result.get('summary', {})
+    record_count = int(source_summary.get('record_count', 0))
+    if record_count < 3:
+        raise ValueError('phylogenetic tree requires at least three sequences')
+    source_alphabet = source_artifact.metadata.get(
+        'alphabet',
+        source_summary.get('alphabet', ''),
+    )
+    if source_alphabet not in {'dna', 'protein'}:
+        raise ValueError('aligned FASTA artifact has no supported alphabet metadata')
+    requested_model = job.parameters['model']
+    model = requested_model
+    if requested_model == 'auto':
+        model = 'gtr' if source_alphabet == 'dna' else 'lg'
+    if source_alphabet == 'dna' and model not in {'jc', 'gtr'}:
+        raise ValueError('DNA FastTree model must be one of: auto, gtr, jc')
+    if source_alphabet == 'protein' and model not in {'jtt', 'wag', 'lg'}:
+        raise ValueError('protein FastTree model must be one of: auto, jtt, lg, wag')
+
+    artifact_root = Path(settings.ARTIFACT_ROOT).resolve()
+    input_path = (artifact_root / source_artifact.storage_path).resolve()
+    if not input_path.is_relative_to(artifact_root) or not input_path.is_file():
+        raise ValueError('aligned FASTA artifact file is unavailable')
+    if input_path.stat().st_size != source_artifact.size:
+        raise ValueError('aligned FASTA artifact size does not match its manifest')
+    if _sha256(input_path) != source_artifact.sha256:
+        raise ValueError('aligned FASTA artifact checksum does not match its manifest')
+
+    output_dir = artifact_root / str(job.id)
+    output_path = output_dir / 'tree.newick'
+    run_metadata = run_fasttree(
+        input_path,
+        output_path,
+        alphabet=source_alphabet,
+        model=model,
+        threads=job.parameters['threads'],
+        timeout=settings.FASTTREE_TIMEOUT,
+    )
+    tree_text = output_path.read_text(encoding='utf-8-sig')
+    summary = summarize_newick(tree_text, expected_leaf_count=record_count)
+
+    with transaction.atomic():
+        locked_job = AnalysisJob.objects.select_for_update().get(id=job.id)
+        if locked_job.status == AnalysisJob.Status.CANCELLED:
+            output_path.unlink(missing_ok=True)
+            return {'job_id': str(job.id), 'status': locked_job.status}
+        artifact = _register_artifact(
+            locked_job,
+            output_path,
+            kind='phylogenetic_tree_newick',
+            media_type='text/x-newick',
+            metadata={
+                'tool': 'FastTree',
+                'tool_version': run_metadata['version'],
+                'model': run_metadata['model'],
+                'threads': run_metadata['threads'],
+                'source_artifact_id': str(source_artifact.id),
+                'alphabet': source_alphabet,
+            },
+        )
+        locked_job.result = {
+            'summary': summary,
+            'tool': {
+                'name': 'FastTree',
+                'version': run_metadata['version'],
+                'model': run_metadata['model'],
+                'threads': run_metadata['threads'],
+            },
+            'source_artifact_id': str(source_artifact.id),
+            'artifacts': [artifact_payload(artifact)],
+        }
+        locked_job.status = AnalysisJob.Status.SUCCEEDED
+        locked_job.stage = 'completed'
+        locked_job.progress = 100
+        locked_job.finished_at = timezone.now()
+        locked_job.error_code = ''
+        locked_job.error_message = ''
+        locked_job.lease_expires_at = None
+        locked_job.save(
+            update_fields=[
+                'result',
+                'status',
+                'stage',
+                'progress',
+                'finished_at',
+                'error_code',
+                'error_message',
+                'lease_expires_at',
+                'updated_at',
+            ]
+        )
+        add_event(
+            locked_job,
+            'job_succeeded',
+            'Phylogenetic tree completed with FastTree',
+            {
+                'leaf_count': summary['leaf_count'],
+                'model': run_metadata['model'],
+            },
+        )
+    return {'job_id': str(job.id), 'status': AnalysisJob.Status.SUCCEEDED}
+
+
 def _submit_cis_element_analysis(job: AnalysisJob) -> dict:
     if not _set_state(job, AnalysisJob.Status.RUNNING, 'submitting', 10):
         return {'job_id': str(job.id), 'status': job.status}
@@ -461,6 +574,8 @@ def execute_analysis_job(job_id: str) -> dict:
         == AnalysisJob.AnalysisType.MULTIPLE_SEQUENCE_ALIGNMENT
     ):
         lease_seconds = max(lease_seconds, settings.MAFFT_TIMEOUT + 60)
+    elif job.analysis_type == AnalysisJob.AnalysisType.PHYLOGENETIC_TREE:
+        lease_seconds = max(lease_seconds, settings.FASTTREE_TIMEOUT + 60)
     claimed = AnalysisJob.objects.filter(
         id=job_id,
         status=AnalysisJob.Status.QUEUED,
@@ -484,6 +599,8 @@ def execute_analysis_job(job_id: str) -> dict:
             == AnalysisJob.AnalysisType.MULTIPLE_SEQUENCE_ALIGNMENT
         ):
             return _execute_multiple_sequence_alignment(job)
+        if job.analysis_type == AnalysisJob.AnalysisType.PHYLOGENETIC_TREE:
+            return _execute_phylogenetic_tree(job)
         raise ValueError(f'unsupported analysis type: {job.analysis_type}')
     except Exception as exc:
         job.refresh_from_db()
@@ -513,6 +630,23 @@ def execute_analysis_job(job_id: str) -> dict:
                     ToolUnavailableError | ToolExecutionError | ValueError,
                 )
                 else 'Multiple sequence alignment failed'
+            )
+        elif job.analysis_type == AnalysisJob.AnalysisType.PHYLOGENETIC_TREE:
+            if isinstance(exc, ToolUnavailableError):
+                error_code = 'CAPABILITY_UNAVAILABLE'
+            elif isinstance(exc, ToolExecutionError):
+                error_code = 'TOOL_EXECUTION_FAILED'
+            elif isinstance(exc, ValueError):
+                error_code = 'INVALID_TREE_INPUT'
+            else:
+                error_code = 'TREE_PROCESSING_FAILED'
+            error_message = (
+                str(exc)
+                if isinstance(
+                    exc,
+                    ToolUnavailableError | ToolExecutionError | ValueError,
+                )
+                else 'Phylogenetic tree inference failed'
             )
         else:
             error_code, error_message = _error_details(exc)

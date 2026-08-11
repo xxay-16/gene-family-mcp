@@ -49,3 +49,7 @@ def _probe(executable: str, version_argument: str) -> dict:
 
 def mafft_capability() -> dict:
     return _probe(settings.MAFFT_EXECUTABLE, '--version')
+
+
+def fasttree_capability() -> dict:
+    return _probe(settings.FASTTREE_EXECUTABLE, '-help')

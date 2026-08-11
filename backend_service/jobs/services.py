@@ -120,6 +120,39 @@ def create_analysis_job(
             'strategy': strategy,
             'threads': threads,
         }
+    elif analysis_type == AnalysisJob.AnalysisType.PHYLOGENETIC_TREE:
+        artifact_id = str(parameters.get('artifact_id', '')).strip()
+        try:
+            parsed_artifact_id = uuid.UUID(artifact_id)
+        except ValueError as exc:
+            raise ValueError('artifact_id must be a valid UUID') from exc
+        source_artifact = Artifact.objects.select_related('job').filter(
+            id=parsed_artifact_id,
+            kind='aligned_fasta',
+            job__status=AnalysisJob.Status.SUCCEEDED,
+        ).first()
+        if source_artifact is None:
+            raise ValueError(
+                'aligned FASTA artifact from a succeeded job was not found'
+            )
+        model = str(parameters.get('model', 'auto')).strip().lower()
+        if model not in {'auto', 'jc', 'gtr', 'jtt', 'wag', 'lg'}:
+            raise ValueError('model must be one of: auto, gtr, jc, jtt, lg, wag')
+        try:
+            threads = int(
+                parameters.get('threads', settings.FASTTREE_DEFAULT_THREADS)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError('threads must be an integer') from exc
+        if not 1 <= threads <= settings.MAX_TOOL_THREADS:
+            raise ValueError(
+                f'threads must be between 1 and {settings.MAX_TOOL_THREADS}'
+            )
+        normalized_parameters = {
+            'artifact_id': str(source_artifact.id),
+            'model': model,
+            'threads': threads,
+        }
 
     normalized_idempotency_key = idempotency_key.strip()
     if len(normalized_idempotency_key) > 128:
@@ -171,6 +204,8 @@ def create_analysis_job(
             == AnalysisJob.AnalysisType.MULTIPLE_SEQUENCE_ALIGNMENT
         ):
             queue_options['timeout'] = settings.MAFFT_TIMEOUT + 30
+        elif analysis_type == AnalysisJob.AnalysisType.PHYLOGENETIC_TREE:
+            queue_options['timeout'] = settings.FASTTREE_TIMEOUT + 30
         queue_task_id = async_task(
             'jobs.tasks.execute_analysis_job',
             str(job.id),

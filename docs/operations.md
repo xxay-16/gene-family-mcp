@@ -91,6 +91,7 @@ Compose 将 `/data/artifacts` 挂载到 `artifact-data` volume。输入和输出
 - `MAX_SEQUENCE_LENGTH` 和 `MAX_ACTIVE_JOBS` 提供基础资源保护。
 - `MAX_FASTA_INPUT_BYTES`、`MAX_FASTA_RECORDS`、`MAX_FASTA_SEQUENCE_LENGTH`、`MAX_FASTA_TOTAL_RESIDUES` 和 `MAX_FASTA_HEADER_LENGTH` 限制 FASTA 资源。
 - `MAFFT_TIMEOUT`、`MAX_TOOL_THREADS` 和 `MAX_ALIGNMENT_OUTPUT_BYTES` 限制多序列比对；django-q2 task timeout 会比 MAFFT subprocess timeout 多 30 秒用于安全收尾。
+- `FASTTREE_TIMEOUT`、`FASTTREE_DEFAULT_THREADS` 和 `MAX_TREE_OUTPUT_BYTES` 限制系统发育树推断。
 - `Q_CLUSTER_RETRY` 必须严格大于普通与 MAFFT task timeout；配置不安全时后端会拒绝启动。
 - PlantCARE 外部等待不占用 worker。
 - 迁移自动创建 `gene-family-poll-external-results` Schedule，每分钟批量检查邮箱。
@@ -153,3 +154,7 @@ docker compose logs --tail 200 worker
 ### MAFFT capability unavailable
 
 生产 Docker 镜像已安装 MAFFT。本机运行时确认 `MAFFT_EXECUTABLE` 指向可执行文件，并访问 `/api/core/capabilities` 查看探测结果。更改可执行文件配置后需要重启 API 和 worker。
+
+### FastTree capability unavailable
+
+生产 Docker 镜像已安装 FastTree。本机运行时确认 `FASTTREE_EXECUTABLE` 指向 FastTree 或 FastTreeMP 可执行文件；OpenMP 线程数由任务参数通过 `OMP_NUM_THREADS` 设置。

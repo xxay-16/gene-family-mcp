@@ -124,14 +124,29 @@ MAX_ALIGNMENT_OUTPUT_BYTES = int(
     os.getenv('MAX_ALIGNMENT_OUTPUT_BYTES', str(100 * 1024 * 1024))
 )
 TOOL_PROBE_TIMEOUT = int(os.getenv('TOOL_PROBE_TIMEOUT', '5'))
+FASTTREE_EXECUTABLE = os.getenv('FASTTREE_EXECUTABLE', 'FastTree')
+FASTTREE_TIMEOUT = int(os.getenv('FASTTREE_TIMEOUT', '1800'))
+FASTTREE_DEFAULT_THREADS = int(os.getenv('FASTTREE_DEFAULT_THREADS', '2'))
+MAX_TREE_OUTPUT_BYTES = int(os.getenv('MAX_TREE_OUTPUT_BYTES', str(20 * 1024 * 1024)))
 Q_CLUSTER_TIMEOUT = int(os.getenv('Q_CLUSTER_TIMEOUT', '300'))
 Q_CLUSTER_RETRY = int(
     os.getenv(
         'Q_CLUSTER_RETRY',
-        str(max(Q_CLUSTER_TIMEOUT, MAFFT_TIMEOUT + 30) + 60),
+        str(
+            max(
+                Q_CLUSTER_TIMEOUT,
+                MAFFT_TIMEOUT + 30,
+                FASTTREE_TIMEOUT + 30,
+            )
+            + 60
+        ),
     )
 )
-if Q_CLUSTER_RETRY <= max(Q_CLUSTER_TIMEOUT, MAFFT_TIMEOUT + 30):
+if Q_CLUSTER_RETRY <= max(
+    Q_CLUSTER_TIMEOUT,
+    MAFFT_TIMEOUT + 30,
+    FASTTREE_TIMEOUT + 30,
+):
     raise RuntimeError(
         'Q_CLUSTER_RETRY must be greater than the longest django-q2 task timeout'
     )

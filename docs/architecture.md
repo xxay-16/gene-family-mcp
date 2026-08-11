@@ -255,7 +255,8 @@ sequenceDiagram
 6. [x] 扩展测试、认证和稳定错误码。
 7. [x] 建立 FASTA Input Artifact、校验与标准化任务。
 8. [x] 建立 MAFFT adapter、运行时能力探测和 Artifact 串联。
-9. [ ] 接入完整基因家族分析工具链。
+9. [x] 建立 FastTree adapter 与受校验的 Newick 输出。
+10. [ ] 接入完整基因家族分析工具链。
 
 ## 14. 架构验收标准
 

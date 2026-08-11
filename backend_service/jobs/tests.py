@@ -719,3 +719,131 @@ class JobExecutionTests(TestCase):
         self.assertEqual(result['status'], AnalysisJob.Status.FAILED)
         self.assertEqual(job.error_code, 'CAPABILITY_UNAVAILABLE')
         self.assertIn('not available', job.error_message)
+
+    def test_phylogenetic_tree_job_creates_validated_newick_artifact(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir)
+            source_job = AnalysisJob.objects.create(
+                analysis_type=AnalysisJob.AnalysisType.MULTIPLE_SEQUENCE_ALIGNMENT,
+                status=AnalysisJob.Status.SUCCEEDED,
+                result={
+                    'summary': {
+                        'record_count': 3,
+                        'alphabet': 'dna',
+                    }
+                },
+            )
+            source_path = artifact_root / str(source_job.id) / 'aligned.fasta'
+            source_path.parent.mkdir(parents=True)
+            source_path.write_text(
+                '>gene1\nACGT\n>gene2\nACGA\n>gene3\nTCGA\n',
+                encoding='utf-8',
+            )
+            source = Artifact.objects.create(
+                job=source_job,
+                kind='aligned_fasta',
+                filename='aligned.fasta',
+                storage_path=str(source_path.relative_to(artifact_root)),
+                media_type='text/x-fasta',
+                size=source_path.stat().st_size,
+                sha256=hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                metadata={'alphabet': 'dna'},
+            )
+            with override_settings(
+                ARTIFACT_ROOT=artifact_root,
+                FASTTREE_TIMEOUT=10,
+            ):
+                job, _ = create_analysis_job(
+                    AnalysisJob.AnalysisType.PHYLOGENETIC_TREE,
+                    {
+                        'artifact_id': str(source.id),
+                        'model': 'auto',
+                        'threads': 2,
+                    },
+                )
+                payload = SignedPackage.loads(OrmQ.objects.get().payload)
+
+                def fake_fasttree(
+                    input_path,
+                    output_path,
+                    *,
+                    alphabet,
+                    model,
+                    threads,
+                    timeout,
+                ):
+                    self.assertEqual(input_path, source_path)
+                    self.assertEqual(alphabet, 'dna')
+                    self.assertEqual(model, 'gtr')
+                    self.assertEqual(threads, 2)
+                    self.assertEqual(timeout, 10)
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_text(
+                        '(gene1:0.1,gene2:0.2,gene3:0.3);\n',
+                        encoding='utf-8',
+                    )
+                    return {
+                        'executable': 'fake-fasttree',
+                        'version': 'FastTree-test',
+                        'alphabet': alphabet,
+                        'model': model,
+                        'threads': threads,
+                    }
+
+                with patch('jobs.tasks.run_fasttree', side_effect=fake_fasttree):
+                    result = execute_analysis_job(str(job.id))
+
+                job.refresh_from_db()
+                tree = Artifact.objects.get(
+                    job=job,
+                    kind='phylogenetic_tree_newick',
+                )
+                tree_text = (artifact_root / tree.storage_path).read_text()
+
+        self.assertEqual(payload['timeout'], 40)
+        self.assertEqual(result['status'], AnalysisJob.Status.SUCCEEDED)
+        self.assertEqual(job.result['summary']['leaf_count'], 3)
+        self.assertEqual(job.result['tool']['model'], 'gtr')
+        self.assertEqual(tree.metadata['source_artifact_id'], str(source.id))
+        self.assertEqual(tree.metadata['tool_version'], 'FastTree-test')
+        self.assertEqual(tree_text, '(gene1:0.1,gene2:0.2,gene3:0.3);\n')
+
+    @override_settings(FASTTREE_EXECUTABLE='definitely-missing-fasttree')
+    def test_phylogenetic_tree_worker_reports_unavailable_runtime(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir)
+            source_job = AnalysisJob.objects.create(
+                analysis_type=AnalysisJob.AnalysisType.MULTIPLE_SEQUENCE_ALIGNMENT,
+                status=AnalysisJob.Status.SUCCEEDED,
+                result={'summary': {'record_count': 3, 'alphabet': 'dna'}},
+            )
+            source_path = artifact_root / str(source_job.id) / 'aligned.fasta'
+            source_path.parent.mkdir(parents=True)
+            source_path.write_text(
+                '>a\nACGT\n>b\nACGA\n>c\nTCGA\n',
+                encoding='utf-8',
+            )
+            source = Artifact.objects.create(
+                job=source_job,
+                kind='aligned_fasta',
+                filename='aligned.fasta',
+                storage_path=str(source_path.relative_to(artifact_root)),
+                media_type='text/x-fasta',
+                size=source_path.stat().st_size,
+                sha256=hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                metadata={'alphabet': 'dna'},
+            )
+            with override_settings(ARTIFACT_ROOT=artifact_root):
+                job = AnalysisJob.objects.create(
+                    analysis_type=AnalysisJob.AnalysisType.PHYLOGENETIC_TREE,
+                    parameters={
+                        'artifact_id': str(source.id),
+                        'model': 'gtr',
+                        'threads': 1,
+                    },
+                )
+                result = execute_analysis_job(str(job.id))
+
+        job.refresh_from_db()
+        self.assertEqual(result['status'], AnalysisJob.Status.FAILED)
+        self.assertEqual(job.error_code, 'CAPABILITY_UNAVAILABLE')

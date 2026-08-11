@@ -34,6 +34,9 @@ class HealthAPITests(TestCase):
         self.assertIn(alignment['status'], {'available', 'unavailable'})
         self.assertNotIn('resolved_executable', alignment['runtime'])
         self.assertNotIn('configured_executable', alignment['runtime'])
+        tree = authorized.json()['analysis_types']['phylogenetic_tree']
+        self.assertIn(tree['status'], {'available', 'unavailable'})
+        self.assertNotIn('resolved_executable', tree['runtime'])
         self.assertEqual(health.status_code, 200)
 
     def test_ready_endpoint_checks_database_and_schedule(self):

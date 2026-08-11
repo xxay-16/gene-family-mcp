@@ -1,6 +1,6 @@
 from django.db import connection
 from django_q.models import Schedule
-from jobs.local_tools.capabilities import mafft_capability
+from jobs.local_tools.capabilities import fasttree_capability, mafft_capability
 from ninja import Router
 from ninja.responses import Response
 
@@ -46,6 +46,7 @@ def ready(request):
 @router.get('/capabilities')
 def capabilities(request):
     mafft = mafft_capability()
+    fasttree = fasttree_capability()
     return {
         'service': 'gene-family-backend',
         'queue_backend': 'django-q2',
@@ -76,6 +77,17 @@ def capabilities(request):
                 'strategies': ['auto', 'linsi', 'ginsi', 'einsi'],
                 'asynchronous': True,
                 'runtime': mafft,
+            },
+            'phylogenetic_tree': {
+                'status': (
+                    'available' if fasttree['available'] else 'unavailable'
+                ),
+                'provider': 'FastTree',
+                'input': 'aligned_fasta Artifact from a succeeded job',
+                'dna_models': ['auto', 'gtr', 'jc'],
+                'protein_models': ['auto', 'jtt', 'lg', 'wag'],
+                'asynchronous': True,
+                'runtime': fasttree,
             },
         },
     }

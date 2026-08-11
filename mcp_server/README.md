@@ -15,6 +15,7 @@
 - `get_capabilities`
 - `validate_fasta`
 - `align_sequences`
+- `build_phylogenetic_tree`
 - `submit_cis_element_analysis`
 - `get_job_status`
 - `get_job_result`
@@ -48,3 +49,5 @@ MCP Server 默认使用 `stdio` transport。
 `validate_fasta(fasta, alphabet, filename, idempotency_key)` 先通过 API 创建内容寻址的输入 Artifact，再提交 `fasta_validation` django-q2 任务。`alphabet` 支持 `auto`、`dna` 和 `protein`。工具立即返回 `job_id`，结果通过 `get_job_result` 获取。
 
 `align_sequences(artifact_id, strategy, threads, idempotency_key)` 消费校验任务的 `normalized_fasta` Artifact，并提交 MAFFT 异步任务。调用前可通过 `get_capabilities` 确认部署环境中的 MAFFT 状态。
+
+`build_phylogenetic_tree(artifact_id, model, threads, idempotency_key)` 消费 MAFFT 的 `aligned_fasta` Artifact，提交 FastTree 任务并生成 Newick Artifact。

@@ -156,6 +156,34 @@ class BackendClientTests(TestCase):
         )
 
     @patch('mcp_server.backend_client.request.urlopen')
+    def test_tree_submission_uses_aligned_artifact_reference(self, urlopen_mock):
+        urlopen_mock.return_value = _Response(
+            {'job_id': 'tree-job', 'status': 'queued'}
+        )
+        client = BackendClient('http://backend.test/api')
+
+        result = client.submit_phylogenetic_tree(
+            'aligned-artifact',
+            model='gtr',
+            threads=4,
+            idempotency_key='tree-request-1',
+        )
+
+        self.assertEqual(result['job_id'], 'tree-job')
+        api_request = urlopen_mock.call_args.args[0]
+        self.assertEqual(
+            json.loads(api_request.data),
+            {
+                'analysis_type': 'phylogenetic_tree',
+                'parameters': {
+                    'artifact_id': 'aligned-artifact',
+                    'model': 'gtr',
+                    'threads': 4,
+                },
+            },
+        )
+
+    @patch('mcp_server.backend_client.request.urlopen')
     def test_backend_http_error_is_structured(self, urlopen_mock):
         from urllib.error import HTTPError
 
@@ -190,6 +218,7 @@ class MCPToolTests(TestCase):
     @patch.object(server.backend, 'submit_cis_element_analysis')
     @patch.object(server.backend, 'submit_fasta_validation')
     @patch.object(server.backend, 'submit_multiple_sequence_alignment')
+    @patch.object(server.backend, 'submit_phylogenetic_tree')
     @patch.object(server.backend, 'get_job')
     @patch.object(server.backend, 'get_job_result')
     @patch.object(server.backend, 'cancel_job')
@@ -198,6 +227,7 @@ class MCPToolTests(TestCase):
         cancel_mock,
         result_mock,
         status_mock,
+        tree_mock,
         alignment_mock,
         fasta_mock,
         submit_mock,
@@ -205,6 +235,7 @@ class MCPToolTests(TestCase):
         submit_mock.return_value = {'job_id': 'job-1'}
         fasta_mock.return_value = {'job_id': 'job-2'}
         alignment_mock.return_value = {'job_id': 'job-3'}
+        tree_mock.return_value = {'job_id': 'job-4'}
         status_mock.return_value = {'status': 'queued'}
         result_mock.return_value = {'result': {}}
         cancel_mock.return_value = {'status': 'cancelled'}
@@ -226,6 +257,10 @@ class MCPToolTests(TestCase):
             server.align_sequences('artifact-1', 'linsi', 4, 'key-3'),
             {'job_id': 'job-3'},
         )
+        self.assertEqual(
+            server.build_phylogenetic_tree('artifact-2', 'gtr', 4, 'key-4'),
+            {'job_id': 'job-4'},
+        )
         self.assertEqual(server.get_job_status('job-1'), {'status': 'queued'})
         self.assertEqual(server.get_job_result('job-1'), {'result': {}})
         self.assertEqual(server.cancel_job('job-1'), {'status': 'cancelled'})
@@ -241,4 +276,10 @@ class MCPToolTests(TestCase):
             'linsi',
             4,
             'key-3',
+        )
+        tree_mock.assert_called_once_with(
+            'artifact-2',
+            'gtr',
+            4,
+            'key-4',
         )

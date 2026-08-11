@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass
 
 DNA_ALPHABET = frozenset('ACGTRYSWKMBDHVN')
 PROTEIN_ALPHABET = frozenset('ABCDEFGHIKLMNPQRSTVWXYZJUO*')
 SUPPORTED_ALPHABETS = {'auto', 'dna', 'protein'}
+SAFE_IDENTIFIER = re.compile(r'^[A-Za-z0-9_.|+\-]+$')
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,11 @@ def parse_and_normalize_fasta(
         if not sequence:
             raise ValueError(f'sequence {current_header.split()[0]!r} is empty')
         identifier, _, description = current_header.partition(' ')
+        if not SAFE_IDENTIFIER.fullmatch(identifier):
+            raise ValueError(
+                f'FASTA identifier {identifier!r} contains unsupported characters; '
+                'use letters, digits, underscore, dot, pipe, plus or hyphen'
+            )
         records.append(FastaRecord(identifier, description.strip(), sequence))
 
     normalized_text = text.replace('\r\n', '\n').replace('\r', '\n')

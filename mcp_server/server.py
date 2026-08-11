@@ -74,6 +74,26 @@ def align_sequences(
 
 
 @mcp.tool()
+def build_phylogenetic_tree(
+    artifact_id: str,
+    model: str = 'auto',
+    threads: int = 2,
+    idempotency_key: str = '',
+) -> dict:
+    """Build a Newick phylogenetic tree from an aligned FASTA Artifact.
+
+    artifact_id must refer to aligned_fasta from align_sequences. For DNA,
+    models are auto, gtr or jc. For proteins, models are auto, jtt, lg or wag.
+    """
+    return backend.submit_phylogenetic_tree(
+        artifact_id,
+        model,
+        threads,
+        idempotency_key,
+    )
+
+
+@mcp.tool()
 def get_job_status(job_id: str) -> dict:
     """Get the current state and progress of an analysis job."""
     return backend.get_job(job_id)
