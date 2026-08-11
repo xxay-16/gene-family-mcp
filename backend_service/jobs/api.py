@@ -5,17 +5,20 @@ from django.shortcuts import get_object_or_404
 from ninja import Router, Schema
 from ninja.responses import Response
 
-from .models import AnalysisJob, Artifact
+from .models import AnalysisJob, Artifact, InputArtifact
 from .services import (
     IdempotencyConflictError,
     JobCapacityError,
     cancel_analysis_job,
     create_analysis_job,
+    create_fasta_input,
+    input_artifact_payload,
     job_payload,
 )
 
 router = Router(tags=['jobs'])
 artifact_router = Router(tags=['artifacts'])
+input_router = Router(tags=['inputs'])
 
 
 class JobCreateIn(Schema):
@@ -23,8 +26,27 @@ class JobCreateIn(Schema):
     parameters: dict
 
 
+class FastaInputCreateIn(Schema):
+    content: str
+    filename: str = 'input.fasta'
+
+
 def _error(code: str, message: str, status: int):
     return Response({'error': {'code': code, 'message': message}}, status=status)
+
+
+@input_router.post('/fasta', response={200: dict, 201: dict})
+def create_fasta_input_artifact(request, payload: FastaInputCreateIn):
+    try:
+        artifact, created = create_fasta_input(
+            payload.content,
+            filename=payload.filename,
+        )
+    except ValueError as exc:
+        return _error('INVALID_INPUT', str(exc), 422)
+    response = input_artifact_payload(artifact)
+    response['created'] = created
+    return (201 if created else 200), response
 
 
 @router.post('', response={202: dict})
@@ -113,7 +135,7 @@ def cancel_job(request, job_id: UUID):
     except AnalysisJob.DoesNotExist:
         return _error('JOB_NOT_FOUND', 'Analysis job not found', 404)
     try:
-        cancel_analysis_job(job)
+        job = cancel_analysis_job(job)
     except ValueError as exc:
         return _error('JOB_NOT_CANCELLABLE', str(exc), 409)
     return job_payload(job)
@@ -130,6 +152,28 @@ def download_artifact(request, artifact_id: UUID):
     file_path = (artifact_root / artifact.storage_path).resolve()
     if not file_path.is_relative_to(artifact_root) or not file_path.is_file():
         return _error('ARTIFACT_NOT_FOUND', 'Artifact file not found', 404)
+    return FileResponse(
+        file_path.open('rb'),
+        as_attachment=True,
+        filename=artifact.filename,
+        content_type=artifact.media_type,
+    )
+
+
+@input_router.get('/{input_artifact_id}/download')
+def download_input_artifact(request, input_artifact_id: UUID):
+    try:
+        artifact = InputArtifact.objects.get(id=input_artifact_id)
+    except InputArtifact.DoesNotExist:
+        return _error('INPUT_ARTIFACT_NOT_FOUND', 'Input artifact not found', 404)
+    from pathlib import Path
+
+    from django.conf import settings
+
+    artifact_root = Path(settings.ARTIFACT_ROOT).resolve()
+    file_path = (artifact_root / artifact.storage_path).resolve()
+    if not file_path.is_relative_to(artifact_root) or not file_path.is_file():
+        return _error('INPUT_ARTIFACT_NOT_FOUND', 'Input artifact file not found', 404)
     return FileResponse(
         file_path.open('rb'),
         as_attachment=True,

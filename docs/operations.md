@@ -74,7 +74,7 @@ python backend_service/manage.py makemigrations --check --dry-run
 
 ## 5. Artifact
 
-Compose 将 `/data/artifacts` 挂载到 `artifact-data` volume。数据库中只保存相对路径、SHA-256、MIME、大小和元数据。
+Compose 将 `/data/artifacts` 挂载到 `artifact-data` volume。输入和输出 Artifact 共用该卷；数据库中只保存相对路径、SHA-256、MIME、大小和元数据。FASTA 输入保存在 `inputs/<sha256>.fasta`，同内容不会重复占用存储。
 
 备份时必须同时备份：
 
@@ -89,6 +89,7 @@ Compose 将 `/data/artifacts` 挂载到 `artifact-data` volume。数据库中只
 - 普通任务超时默认 300 秒，重试锁默认 360 秒。
 - `max_attempts=1`，业务失败由 `AnalysisJob` 记录并显式处理。
 - `MAX_SEQUENCE_LENGTH` 和 `MAX_ACTIVE_JOBS` 提供基础资源保护。
+- `MAX_FASTA_INPUT_BYTES`、`MAX_FASTA_RECORDS`、`MAX_FASTA_SEQUENCE_LENGTH`、`MAX_FASTA_TOTAL_RESIDUES` 和 `MAX_FASTA_HEADER_LENGTH` 限制 FASTA 资源。
 - PlantCARE 外部等待不占用 worker。
 - 迁移自动创建 `gene-family-poll-external-results` Schedule，每分钟批量检查邮箱。
 - 任务与轮询均使用租约，避免多 worker 重复处理；过期运行租约会被标记为 `WORKER_LEASE_EXPIRED`。

@@ -82,6 +82,17 @@ class BackendClient:
             extra_headers=headers,
         )
 
+    def create_fasta_input(
+        self,
+        content: str,
+        filename: str = 'input.fasta',
+    ) -> dict[str, Any]:
+        return self._request(
+            'POST',
+            '/inputs/fasta',
+            {'content': content, 'filename': filename},
+        )
+
     def get_job(self, job_id: str) -> dict[str, Any]:
         return self._request('GET', f'/jobs/{job_id}')
 
@@ -101,6 +112,25 @@ class BackendClient:
             {'sequence': sequence},
             idempotency_key=idempotency_key,
         )
+
+    def submit_fasta_validation(
+        self,
+        fasta: str,
+        alphabet: str = 'auto',
+        filename: str = 'input.fasta',
+        idempotency_key: str = '',
+    ) -> dict[str, Any]:
+        input_artifact = self.create_fasta_input(fasta, filename)
+        job = self.create_job(
+            'fasta_validation',
+            {
+                'input_artifact_id': input_artifact['input_artifact_id'],
+                'alphabet': alphabet,
+            },
+            idempotency_key=idempotency_key,
+        )
+        job['input_artifact'] = input_artifact
+        return job
 
     def get_task_status(self, task_id: str) -> dict[str, Any]:
         return self.get_job(task_id)

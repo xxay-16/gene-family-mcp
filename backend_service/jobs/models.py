@@ -6,6 +6,7 @@ from django.db import models
 class AnalysisJob(models.Model):
     class AnalysisType(models.TextChoices):
         CIS_ELEMENTS = 'cis_elements', 'Cis-element analysis'
+        FASTA_VALIDATION = 'fasta_validation', 'FASTA validation and normalization'
 
     class Status(models.TextChoices):
         QUEUED = 'queued', 'Queued'
@@ -88,5 +89,28 @@ class Artifact(models.Model):
             models.UniqueConstraint(
                 fields=['job', 'storage_path'],
                 name='unique_job_artifact_path',
+            )
+        ]
+
+
+class InputArtifact(models.Model):
+    """Immutable, content-addressed input shared by analysis jobs."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    kind = models.CharField(max_length=64)
+    filename = models.CharField(max_length=255)
+    storage_path = models.CharField(max_length=1024, unique=True)
+    media_type = models.CharField(max_length=255, default='application/octet-stream')
+    size = models.PositiveBigIntegerField()
+    sha256 = models.CharField(max_length=64, db_index=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['kind', 'sha256'],
+                name='unique_input_artifact_content',
             )
         ]

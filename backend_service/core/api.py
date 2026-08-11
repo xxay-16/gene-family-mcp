@@ -52,6 +52,14 @@ def capabilities(request):
             'interval_seconds': 60,
         },
         'analysis_types': {
+            'fasta_validation': {
+                'status': 'available',
+                'provider': 'local',
+                'input': 'FASTA text uploaded as a content-addressed input artifact',
+                'alphabets': ['auto', 'dna', 'protein'],
+                'outputs': ['normalized_fasta', 'fasta_validation_summary'],
+                'asynchronous': True,
+            },
             'cis_elements': {
                 'status': 'available',
                 'provider': 'PlantCARE',

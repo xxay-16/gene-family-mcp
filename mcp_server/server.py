@@ -32,6 +32,27 @@ def submit_cis_element_analysis(
 
 
 @mcp.tool()
+def validate_fasta(
+    fasta: str,
+    alphabet: str = 'auto',
+    filename: str = 'input.fasta',
+    idempotency_key: str = '',
+) -> dict:
+    """Validate and normalize a multi-record FASTA input asynchronously.
+
+    Alphabet may be auto, dna or protein. The backend stores the input as a
+    content-addressed artifact, validates identifiers and residue symbols, and
+    emits normalized FASTA plus a JSON summary.
+    """
+    return backend.submit_fasta_validation(
+        fasta,
+        alphabet,
+        filename,
+        idempotency_key,
+    )
+
+
+@mcp.tool()
 def get_job_status(job_id: str) -> dict:
     """Get the current state and progress of an analysis job."""
     return backend.get_job(job_id)

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import os
+import uuid
+from pathlib import Path
 from typing import Any
 
 from django.conf import settings
@@ -8,7 +12,7 @@ from django_q.models import OrmQ
 from django_q.signing import SignedPackage
 from django_q.tasks import async_task
 
-from .models import AnalysisEvent, AnalysisJob, Artifact
+from .models import AnalysisEvent, AnalysisJob, Artifact, InputArtifact
 
 TERMINAL_STATUSES = {
     AnalysisJob.Status.SUCCEEDED,
@@ -58,13 +62,33 @@ def create_analysis_job(
     *,
     idempotency_key: str = '',
 ) -> tuple[AnalysisJob, bool]:
-    if analysis_type != AnalysisJob.AnalysisType.CIS_ELEMENTS:
+    if analysis_type not in AnalysisJob.AnalysisType.values:
         raise ValueError(f'unsupported analysis type: {analysis_type}')
 
     normalized_parameters = dict(parameters)
-    normalized_parameters['sequence'] = normalize_dna_sequence(
-        str(parameters.get('sequence', ''))
-    )
+    if analysis_type == AnalysisJob.AnalysisType.CIS_ELEMENTS:
+        normalized_parameters = {
+            'sequence': normalize_dna_sequence(str(parameters.get('sequence', '')))
+        }
+    elif analysis_type == AnalysisJob.AnalysisType.FASTA_VALIDATION:
+        input_artifact_id = str(parameters.get('input_artifact_id', '')).strip()
+        try:
+            parsed_artifact_id = uuid.UUID(input_artifact_id)
+        except ValueError as exc:
+            raise ValueError('input_artifact_id must be a valid UUID') from exc
+        input_artifact = InputArtifact.objects.filter(
+            id=parsed_artifact_id,
+            kind='fasta_input',
+        ).first()
+        if input_artifact is None:
+            raise ValueError('FASTA input artifact was not found')
+        alphabet = str(parameters.get('alphabet', 'auto')).strip().lower()
+        if alphabet not in {'auto', 'dna', 'protein'}:
+            raise ValueError('alphabet must be one of: auto, dna, protein')
+        normalized_parameters = {
+            'input_artifact_id': str(input_artifact.id),
+            'alphabet': alphabet,
+        }
 
     normalized_idempotency_key = idempotency_key.strip()
     if len(normalized_idempotency_key) > 128:
@@ -141,6 +165,78 @@ def create_analysis_job(
     return job, True
 
 
+def create_fasta_input(
+    content: str,
+    *,
+    filename: str = 'input.fasta',
+) -> tuple[InputArtifact, bool]:
+    if not isinstance(content, str):
+        raise ValueError('FASTA content must be text')
+    encoded = content.encode('utf-8')
+    if not encoded.strip():
+        raise ValueError('FASTA content must not be empty')
+    if len(encoded) > settings.MAX_FASTA_INPUT_BYTES:
+        raise ValueError(
+            f'FASTA input exceeds maximum size of {settings.MAX_FASTA_INPUT_BYTES} bytes'
+        )
+
+    safe_filename = Path(filename).name.strip() or 'input.fasta'
+    if len(safe_filename) > 255:
+        raise ValueError('filename must be at most 255 characters')
+    digest = hashlib.sha256(encoded).hexdigest()
+    existing = InputArtifact.objects.filter(
+        kind='fasta_input',
+        sha256=digest,
+    ).first()
+    if existing is not None:
+        artifact_root = Path(settings.ARTIFACT_ROOT).resolve()
+        existing_path = (artifact_root / existing.storage_path).resolve()
+        if not existing_path.is_relative_to(artifact_root):
+            raise ValueError('stored FASTA input path is outside ARTIFACT_ROOT')
+        if (
+            not existing_path.is_file()
+            or existing_path.stat().st_size != existing.size
+            or hashlib.sha256(existing_path.read_bytes()).hexdigest() != existing.sha256
+        ):
+            existing_path.parent.mkdir(parents=True, exist_ok=True)
+            repair_path = existing_path.parent / f'.{digest}.{uuid.uuid4().hex}.tmp'
+            try:
+                repair_path.write_bytes(encoded)
+                os.replace(repair_path, existing_path)
+            finally:
+                repair_path.unlink(missing_ok=True)
+        return existing, False
+
+    artifact_root = Path(settings.ARTIFACT_ROOT).resolve()
+    input_dir = artifact_root / 'inputs'
+    input_dir.mkdir(parents=True, exist_ok=True)
+    storage_path = Path('inputs') / f'{digest}.fasta'
+    final_path = artifact_root / storage_path
+    temp_path = input_dir / f'.{digest}.{uuid.uuid4().hex}.tmp'
+    try:
+        temp_path.write_bytes(encoded)
+        os.replace(temp_path, final_path)
+        try:
+            with transaction.atomic():
+                artifact = InputArtifact.objects.create(
+                    kind='fasta_input',
+                    filename=safe_filename,
+                    storage_path=storage_path.as_posix(),
+                    media_type='text/x-fasta',
+                    size=len(encoded),
+                    sha256=digest,
+                )
+        except IntegrityError:
+            artifact = InputArtifact.objects.get(
+                kind='fasta_input',
+                sha256=digest,
+            )
+            return artifact, False
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return artifact, True
+
+
 def _delete_queued_task(queue_task_id: str) -> bool:
     if not queue_task_id:
         return False
@@ -156,38 +252,40 @@ def _delete_queued_task(queue_task_id: str) -> bool:
 
 
 def cancel_analysis_job(job: AnalysisJob) -> AnalysisJob:
-    if job.status in TERMINAL_STATUSES:
-        raise ValueError(f'job is already {job.status}')
-
-    previous_status = job.status
-    job.status = AnalysisJob.Status.CANCELLED
-    job.stage = 'cancelled'
-    job.progress = None
-    job.lease_expires_at = None
     from django.utils import timezone
 
-    job.finished_at = timezone.now()
-    job.save(
-        update_fields=[
-            'status',
-            'stage',
-            'progress',
-            'lease_expires_at',
-            'finished_at',
-            'updated_at',
-        ]
-    )
-    removed_from_queue = _delete_queued_task(job.queue_task_id)
-    add_event(
-        job,
-        'job_cancelled',
-        'Analysis job cancelled',
-        {
-            'previous_status': previous_status,
-            'removed_from_queue': removed_from_queue,
-        },
-    )
-    return job
+    with transaction.atomic():
+        locked_job = AnalysisJob.objects.select_for_update().get(id=job.id)
+        if locked_job.status in TERMINAL_STATUSES:
+            raise ValueError(f'job is already {locked_job.status}')
+
+        previous_status = locked_job.status
+        locked_job.status = AnalysisJob.Status.CANCELLED
+        locked_job.stage = 'cancelled'
+        locked_job.progress = None
+        locked_job.lease_expires_at = None
+        locked_job.finished_at = timezone.now()
+        locked_job.save(
+            update_fields=[
+                'status',
+                'stage',
+                'progress',
+                'lease_expires_at',
+                'finished_at',
+                'updated_at',
+            ]
+        )
+        removed_from_queue = _delete_queued_task(locked_job.queue_task_id)
+        add_event(
+            locked_job,
+            'job_cancelled',
+            'Analysis job cancelled',
+            {
+                'previous_status': previous_status,
+                'removed_from_queue': removed_from_queue,
+            },
+        )
+    return locked_job
 
 
 def artifact_payload(artifact: Artifact) -> dict[str, Any]:
@@ -200,6 +298,19 @@ def artifact_payload(artifact: Artifact) -> dict[str, Any]:
         'sha256': artifact.sha256,
         'metadata': artifact.metadata,
         'download_url': f'/api/artifacts/{artifact.id}/download',
+    }
+
+
+def input_artifact_payload(artifact: InputArtifact) -> dict[str, Any]:
+    return {
+        'input_artifact_id': str(artifact.id),
+        'kind': artifact.kind,
+        'filename': artifact.filename,
+        'media_type': artifact.media_type,
+        'size': artifact.size,
+        'sha256': artifact.sha256,
+        'metadata': artifact.metadata,
+        'download_url': f'/api/inputs/{artifact.id}/download',
     }
 
 

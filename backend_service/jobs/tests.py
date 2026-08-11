@@ -11,7 +11,7 @@ from django_q.models import OrmQ, Schedule
 from django_q.signing import SignedPackage
 
 from .models import AnalysisEvent, AnalysisJob, Artifact
-from .services import create_analysis_job
+from .services import create_analysis_job, create_fasta_input
 from .tasks import execute_analysis_job, poll_waiting_external_jobs
 
 
@@ -122,6 +122,21 @@ class JobAPITests(TestCase):
         self.assertEqual(job.status, AnalysisJob.Status.CANCELLED)
         self.assertTrue(job.events.filter(event_type='job_cancelled').exists())
 
+    def test_completed_job_cannot_be_cancelled(self):
+        job = AnalysisJob.objects.create(
+            analysis_type=AnalysisJob.AnalysisType.CIS_ELEMENTS,
+            parameters={'sequence': 'ACGT'},
+            status=AnalysisJob.Status.SUCCEEDED,
+            stage='completed',
+            progress=100,
+        )
+
+        response = self.client.post(f'/api/jobs/{job.id}/cancel')
+
+        self.assertEqual(response.status_code, 409)
+        job.refresh_from_db()
+        self.assertEqual(job.status, AnalysisJob.Status.SUCCEEDED)
+
     def test_unknown_job_returns_404(self):
         response = self.client.get(f'/api/jobs/{uuid.uuid4()}')
 
@@ -149,6 +164,89 @@ class JobAPITests(TestCase):
             event_response.json()['events'][0]['event_type'],
             'job_created',
         )
+
+    @patch('jobs.services.async_task', return_value='q2-fasta-task')
+    def test_upload_fasta_and_create_validation_job(self, _async_task_mock):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with override_settings(ARTIFACT_ROOT=Path(temp_dir)):
+                input_response = self.client.post(
+                    '/api/inputs/fasta',
+                    data={
+                        'content': '>gene1\nacgt\n',
+                        'filename': '../genes.fa',
+                    },
+                    content_type='application/json',
+                )
+                self.assertEqual(input_response.status_code, 201)
+                input_payload = input_response.json()
+                self.assertEqual(input_payload['filename'], 'genes.fa')
+                self.assertTrue(
+                    (Path(temp_dir) / f"inputs/{input_payload['sha256']}.fasta").is_file()
+                )
+
+                job_response = self.client.post(
+                    '/api/jobs',
+                    data={
+                        'analysis_type': 'fasta_validation',
+                        'parameters': {
+                            'input_artifact_id': input_payload['input_artifact_id'],
+                            'alphabet': 'dna',
+                        },
+                    },
+                    content_type='application/json',
+                )
+
+        self.assertEqual(job_response.status_code, 202)
+        job = AnalysisJob.objects.get(id=job_response.json()['job_id'])
+        self.assertEqual(job.analysis_type, AnalysisJob.AnalysisType.FASTA_VALIDATION)
+        self.assertNotIn('content', job.parameters)
+
+    def test_fasta_input_is_content_addressed_and_downloadable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with override_settings(ARTIFACT_ROOT=Path(temp_dir)):
+                first, first_created = create_fasta_input(
+                    '>gene1\nACGT\n',
+                    filename='first.fa',
+                )
+                second, second_created = create_fasta_input(
+                    '>gene1\nACGT\n',
+                    filename='second.fa',
+                )
+                response = self.client.get(
+                    f'/api/inputs/{first.id}/download'
+                )
+                body = b''.join(response.streaming_content)
+
+        self.assertTrue(first_created)
+        self.assertFalse(second_created)
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body, b'>gene1\nACGT\n')
+
+    def test_reupload_repairs_missing_content_addressed_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir)
+            with override_settings(ARTIFACT_ROOT=artifact_root):
+                artifact, _ = create_fasta_input('>gene1\nACGT\n')
+                stored_path = artifact_root / artifact.storage_path
+                stored_path.unlink()
+
+                reused, created = create_fasta_input('>gene1\nACGT\n')
+
+                self.assertFalse(created)
+                self.assertEqual(reused.id, artifact.id)
+                self.assertEqual(stored_path.read_bytes(), b'>gene1\nACGT\n')
+
+    @override_settings(MAX_FASTA_INPUT_BYTES=5)
+    def test_fasta_input_size_limit(self):
+        response = self.client.post(
+            '/api/inputs/fasta',
+            data={'content': '>gene1\nACGT\n'},
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertIn('maximum size', response.json()['error']['message'])
 
 
 class JobExecutionTests(TestCase):
@@ -422,3 +520,81 @@ class JobExecutionTests(TestCase):
         self.assertEqual(result['stale_running'], 1)
         self.assertEqual(job.status, AnalysisJob.Status.FAILED)
         self.assertEqual(job.error_code, 'WORKER_LEASE_EXPIRED')
+
+    def test_fasta_worker_normalizes_and_registers_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir)
+            with override_settings(ARTIFACT_ROOT=artifact_root):
+                input_artifact, _ = create_fasta_input(
+                    '>gene1 description\nacgtn\n>gene2\nGGCC\n',
+                    filename='genes.fa',
+                )
+                job = AnalysisJob.objects.create(
+                    analysis_type=AnalysisJob.AnalysisType.FASTA_VALIDATION,
+                    parameters={
+                        'input_artifact_id': str(input_artifact.id),
+                        'alphabet': 'auto',
+                    },
+                )
+
+                result = execute_analysis_job(str(job.id))
+
+                job.refresh_from_db()
+                normalized = Artifact.objects.get(job=job, kind='normalized_fasta')
+                normalized_path = artifact_root / normalized.storage_path
+                self.assertEqual(
+                    normalized_path.read_text(encoding='utf-8'),
+                    '>gene1 description\nACGTN\n>gene2\nGGCC\n',
+                )
+
+        self.assertEqual(result['status'], AnalysisJob.Status.SUCCEEDED)
+        self.assertEqual(job.status, AnalysisJob.Status.SUCCEEDED)
+        self.assertEqual(job.result['summary']['record_count'], 2)
+        self.assertEqual(job.result['summary']['alphabet'], 'dna')
+        self.assertEqual(job.result['summary']['gc_percent'], 66.67)
+        self.assertEqual(Artifact.objects.filter(job=job).count(), 2)
+        self.assertTrue(job.events.filter(event_type='job_succeeded').exists())
+
+    def test_fasta_worker_rejects_duplicate_identifiers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with override_settings(ARTIFACT_ROOT=Path(temp_dir)):
+                input_artifact, _ = create_fasta_input(
+                    '>duplicate\nACGT\n>duplicate another\nTTTT\n'
+                )
+                job = AnalysisJob.objects.create(
+                    analysis_type=AnalysisJob.AnalysisType.FASTA_VALIDATION,
+                    parameters={
+                        'input_artifact_id': str(input_artifact.id),
+                        'alphabet': 'dna',
+                    },
+                )
+
+                result = execute_analysis_job(str(job.id))
+
+        job.refresh_from_db()
+        self.assertEqual(result['status'], AnalysisJob.Status.FAILED)
+        self.assertEqual(job.error_code, 'INVALID_FASTA')
+        self.assertIn('identifiers must be unique', job.error_message)
+
+    def test_fasta_worker_detects_tampered_input(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir)
+            with override_settings(ARTIFACT_ROOT=artifact_root):
+                input_artifact, _ = create_fasta_input('>gene1\nACGT\n')
+                (artifact_root / input_artifact.storage_path).write_bytes(
+                    b'>gene1\nTTTT\n'
+                )
+                job = AnalysisJob.objects.create(
+                    analysis_type=AnalysisJob.AnalysisType.FASTA_VALIDATION,
+                    parameters={
+                        'input_artifact_id': str(input_artifact.id),
+                        'alphabet': 'dna',
+                    },
+                )
+
+                execute_analysis_job(str(job.id))
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, AnalysisJob.Status.FAILED)
+        self.assertEqual(job.error_code, 'INVALID_FASTA')
+        self.assertIn('checksum', job.error_message)

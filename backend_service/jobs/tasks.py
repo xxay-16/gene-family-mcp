@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 from datetime import timedelta
 from pathlib import Path
@@ -8,9 +9,11 @@ from pathlib import Path
 from cis_elements.parser import process_plantcare_attachments
 from cis_elements.services import collect_results, submit_prediction
 from django.conf import settings
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from .fasta import parse_and_normalize_fasta
 from .models import AnalysisJob, Artifact
 from .services import add_event, artifact_payload
 
@@ -55,6 +58,9 @@ def _register_artifact(
     path: Path,
     *,
     structured_path: Path | None = None,
+    kind: str | None = None,
+    media_type: str | None = None,
+    metadata: dict | None = None,
 ) -> Artifact:
     artifact_root = Path(settings.ARTIFACT_ROOT).resolve()
     resolved_path = path.resolve()
@@ -62,12 +68,14 @@ def _register_artifact(
         raise ValueError('artifact path is outside ARTIFACT_ROOT')
     storage_path = str(resolved_path.relative_to(artifact_root))
     defaults = {
-        'kind': _artifact_kind(resolved_path, structured_path),
+        'kind': kind or _artifact_kind(resolved_path, structured_path),
         'filename': resolved_path.name,
-        'media_type': mimetypes.guess_type(resolved_path.name)[0]
+        'media_type': media_type
+        or mimetypes.guess_type(resolved_path.name)[0]
         or 'application/octet-stream',
         'size': resolved_path.stat().st_size,
         'sha256': _sha256(resolved_path),
+        'metadata': metadata or {},
     }
     artifact, _ = Artifact.objects.update_or_create(
         job=job,
@@ -183,8 +191,153 @@ def _complete_job(job: AnalysisJob, provider_result: dict):
     add_event(job, 'job_succeeded', 'Analysis job completed')
 
 
+def _complete_fasta_validation(job: AnalysisJob) -> None:
+    from .models import InputArtifact
+
+    input_artifact = InputArtifact.objects.get(
+        id=job.parameters['input_artifact_id'],
+        kind='fasta_input',
+    )
+    artifact_root = Path(settings.ARTIFACT_ROOT).resolve()
+    input_path = (artifact_root / input_artifact.storage_path).resolve()
+    if not input_path.is_relative_to(artifact_root) or not input_path.is_file():
+        raise ValueError('FASTA input artifact file is unavailable')
+    if input_path.stat().st_size != input_artifact.size:
+        raise ValueError('FASTA input artifact size does not match its manifest')
+    if _sha256(input_path) != input_artifact.sha256:
+        raise ValueError('FASTA input artifact checksum does not match its manifest')
+
+    try:
+        text = input_path.read_text(encoding='utf-8-sig')
+    except UnicodeDecodeError as exc:
+        raise ValueError('FASTA input must be valid UTF-8 text') from exc
+    normalized, summary = parse_and_normalize_fasta(
+        text,
+        alphabet=job.parameters['alphabet'],
+        max_records=settings.MAX_FASTA_RECORDS,
+        max_sequence_length=settings.MAX_FASTA_SEQUENCE_LENGTH,
+        max_total_residues=settings.MAX_FASTA_TOTAL_RESIDUES,
+        max_header_length=settings.MAX_FASTA_HEADER_LENGTH,
+    )
+
+    output_dir = artifact_root / str(job.id)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    normalized_path = output_dir / 'normalized.fasta'
+    summary_path = output_dir / 'fasta_summary.json'
+    normalized_path.write_text(normalized, encoding='utf-8', newline='\n')
+    summary_path.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2) + '\n',
+        encoding='utf-8',
+        newline='\n',
+    )
+    with transaction.atomic():
+        locked_job = AnalysisJob.objects.select_for_update().get(id=job.id)
+        if locked_job.status == AnalysisJob.Status.CANCELLED:
+            return
+        artifacts = [
+            _register_artifact(
+                locked_job,
+                normalized_path,
+                kind='normalized_fasta',
+                media_type='text/x-fasta',
+                metadata={
+                    'alphabet': summary['alphabet'],
+                    'record_count': summary['record_count'],
+                },
+            ),
+            _register_artifact(
+                locked_job,
+                summary_path,
+                kind='fasta_validation_summary',
+                media_type='application/json',
+            ),
+        ]
+        locked_job.result = {
+            'summary': summary,
+            'input': {
+                'input_artifact_id': str(input_artifact.id),
+                'filename': input_artifact.filename,
+                'sha256': input_artifact.sha256,
+            },
+            'artifacts': [artifact_payload(artifact) for artifact in artifacts],
+        }
+        locked_job.status = AnalysisJob.Status.SUCCEEDED
+        locked_job.stage = 'completed'
+        locked_job.progress = 100
+        locked_job.finished_at = timezone.now()
+        locked_job.error_code = ''
+        locked_job.error_message = ''
+        locked_job.lease_expires_at = None
+        locked_job.save(
+            update_fields=[
+                'result',
+                'status',
+                'stage',
+                'progress',
+                'finished_at',
+                'error_code',
+                'error_message',
+                'lease_expires_at',
+                'updated_at',
+            ]
+        )
+        add_event(
+            locked_job,
+            'job_succeeded',
+            'FASTA validation and normalization completed',
+            {
+                'record_count': summary['record_count'],
+                'alphabet': summary['alphabet'],
+            },
+        )
+
+
+def _execute_fasta_validation(job: AnalysisJob) -> dict:
+    if not _set_state(job, AnalysisJob.Status.RUNNING, 'validating_fasta', 20):
+        return {'job_id': str(job.id), 'status': job.status}
+    _complete_fasta_validation(job)
+    job.refresh_from_db()
+    return {'job_id': str(job.id), 'status': job.status}
+
+
+def _submit_cis_element_analysis(job: AnalysisJob) -> dict:
+    if not _set_state(job, AnalysisJob.Status.RUNNING, 'submitting', 10):
+        return {'job_id': str(job.id), 'status': job.status}
+    provider_ref = submit_prediction(job.parameters['sequence'])
+    job.refresh_from_db()
+    if job.status == AnalysisJob.Status.CANCELLED:
+        return {'job_id': str(job.id), 'status': job.status}
+
+    job.provider_ref = provider_ref
+    job.external_deadline = timezone.now() + timedelta(
+        seconds=settings.PLANTCARE_RESULT_TIMEOUT
+    )
+    job.status = AnalysisJob.Status.WAITING_EXTERNAL
+    job.stage = 'waiting_plantcare'
+    job.progress = 40
+    job.lease_expires_at = None
+    job.save(
+        update_fields=[
+            'provider_ref',
+            'external_deadline',
+            'status',
+            'stage',
+            'progress',
+            'lease_expires_at',
+            'updated_at',
+        ]
+    )
+    add_event(
+        job,
+        'provider_submitted',
+        'PlantCARE request submitted',
+        {'provider_ref': provider_ref},
+    )
+    return {'job_id': str(job.id), 'status': job.status}
+
+
 def execute_analysis_job(job_id: str) -> dict:
-    """Submit an analysis to its provider, then release the worker."""
+    """Claim and dispatch one business analysis through django-q2."""
     try:
         job = AnalysisJob.objects.get(id=job_id)
     except AnalysisJob.DoesNotExist:
@@ -208,42 +361,22 @@ def execute_analysis_job(job_id: str) -> dict:
     job.refresh_from_db()
 
     try:
-        if not _set_state(job, AnalysisJob.Status.RUNNING, 'submitting', 10):
-            return {'job_id': job_id, 'status': job.status}
-        provider_ref = submit_prediction(job.parameters['sequence'])
-        job.refresh_from_db()
-        if job.status == AnalysisJob.Status.CANCELLED:
-            return {'job_id': job_id, 'status': job.status}
-
-        job.provider_ref = provider_ref
-        job.external_deadline = timezone.now() + timedelta(
-            seconds=settings.PLANTCARE_RESULT_TIMEOUT
-        )
-        job.status = AnalysisJob.Status.WAITING_EXTERNAL
-        job.stage = 'waiting_plantcare'
-        job.progress = 40
-        job.lease_expires_at = None
-        job.save(
-            update_fields=[
-                'provider_ref',
-                'external_deadline',
-                'status',
-                'stage',
-                'progress',
-                'lease_expires_at',
-                'updated_at',
-            ]
-        )
-        add_event(
-            job,
-            'provider_submitted',
-            'PlantCARE request submitted',
-            {'provider_ref': provider_ref},
-        )
-        return {'job_id': job_id, 'status': job.status}
+        if job.analysis_type == AnalysisJob.AnalysisType.CIS_ELEMENTS:
+            return _submit_cis_element_analysis(job)
+        if job.analysis_type == AnalysisJob.AnalysisType.FASTA_VALIDATION:
+            return _execute_fasta_validation(job)
+        raise ValueError(f'unsupported analysis type: {job.analysis_type}')
     except Exception as exc:
         job.refresh_from_db()
-        error_code, error_message = _error_details(exc)
+        if job.analysis_type == AnalysisJob.AnalysisType.FASTA_VALIDATION:
+            error_code = (
+                'INVALID_FASTA' if isinstance(exc, ValueError) else 'FASTA_PROCESSING_FAILED'
+            )
+            error_message = (
+                str(exc) if isinstance(exc, ValueError) else 'FASTA processing failed'
+            )
+        else:
+            error_code, error_message = _error_details(exc)
         _fail_job(job, error_code, error_message, exc)
         return {
             'job_id': job_id,

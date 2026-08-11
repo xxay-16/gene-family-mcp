@@ -74,6 +74,56 @@ class BackendClientTests(TestCase):
         self.assertEqual(cancel_request.method, 'POST')
 
     @patch('mcp_server.backend_client.request.urlopen')
+    def test_fasta_submission_uploads_input_then_creates_job(self, urlopen_mock):
+        urlopen_mock.side_effect = [
+            _Response(
+                {
+                    'input_artifact_id': 'input-123',
+                    'sha256': 'a' * 64,
+                    'created': True,
+                }
+            ),
+            _Response({'job_id': 'job-456', 'status': 'queued'}),
+        ]
+        client = BackendClient('http://backend.test/api')
+
+        result = client.submit_fasta_validation(
+            '>gene1\nACGT\n',
+            alphabet='dna',
+            filename='genes.fa',
+            idempotency_key='fasta-request-1',
+        )
+
+        self.assertEqual(result['job_id'], 'job-456')
+        self.assertEqual(result['input_artifact']['input_artifact_id'], 'input-123')
+        upload_request, job_request = [
+            call.args[0] for call in urlopen_mock.call_args_list
+        ]
+        self.assertEqual(
+            upload_request.full_url,
+            'http://backend.test/api/inputs/fasta',
+        )
+        self.assertEqual(
+            json.loads(upload_request.data),
+            {'content': '>gene1\nACGT\n', 'filename': 'genes.fa'},
+        )
+        self.assertEqual(job_request.full_url, 'http://backend.test/api/jobs')
+        self.assertEqual(
+            json.loads(job_request.data),
+            {
+                'analysis_type': 'fasta_validation',
+                'parameters': {
+                    'input_artifact_id': 'input-123',
+                    'alphabet': 'dna',
+                },
+            },
+        )
+        self.assertEqual(
+            job_request.headers['Idempotency-key'],
+            'fasta-request-1',
+        )
+
+    @patch('mcp_server.backend_client.request.urlopen')
     def test_backend_http_error_is_structured(self, urlopen_mock):
         from urllib.error import HTTPError
 
@@ -106,6 +156,7 @@ class MCPToolTests(TestCase):
         capabilities_mock.assert_called_once()
 
     @patch.object(server.backend, 'submit_cis_element_analysis')
+    @patch.object(server.backend, 'submit_fasta_validation')
     @patch.object(server.backend, 'get_job')
     @patch.object(server.backend, 'get_job_result')
     @patch.object(server.backend, 'cancel_job')
@@ -114,9 +165,11 @@ class MCPToolTests(TestCase):
         cancel_mock,
         result_mock,
         status_mock,
+        fasta_mock,
         submit_mock,
     ):
         submit_mock.return_value = {'job_id': 'job-1'}
+        fasta_mock.return_value = {'job_id': 'job-2'}
         status_mock.return_value = {'status': 'queued'}
         result_mock.return_value = {'result': {}}
         cancel_mock.return_value = {'status': 'cancelled'}
@@ -125,7 +178,22 @@ class MCPToolTests(TestCase):
             server.submit_cis_element_analysis('ACGT', 'key-1'),
             {'job_id': 'job-1'},
         )
+        self.assertEqual(
+            server.validate_fasta(
+                '>gene1\nACGT\n',
+                'dna',
+                'genes.fa',
+                'key-2',
+            ),
+            {'job_id': 'job-2'},
+        )
         self.assertEqual(server.get_job_status('job-1'), {'status': 'queued'})
         self.assertEqual(server.get_job_result('job-1'), {'result': {}})
         self.assertEqual(server.cancel_job('job-1'), {'status': 'cancelled'})
         submit_mock.assert_called_once_with('ACGT', 'key-1')
+        fasta_mock.assert_called_once_with(
+            '>gene1\nACGT\n',
+            'dna',
+            'genes.fa',
+            'key-2',
+        )

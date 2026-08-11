@@ -16,7 +16,8 @@ flowchart LR
     API --> DB["业务数据库"]
     API --> QUEUE["任务队列"]
     QUEUE --> WORKER["分析 worker"]
-    WORKER --> PROVIDERS["PlantCARE / BLAST / HMMER / MAFFT / IQ-TREE"]
+    WORKER --> LOCAL["FASTA validator / future local tools"]
+    WORKER --> PROVIDERS["PlantCARE / future providers"]
     WORKER --> ARTIFACTS["分析产物存储"]
     WORKER --> DB
 ```
@@ -79,6 +80,7 @@ MCP Server 只能依赖稳定的公开 API，不依赖后端内部队列表。
 | `GET` | `/api/core/health` | 健康检查 |
 | `GET` | `/api/capabilities` | 工具、数据库和版本能力 |
 | `POST` | `/api/jobs` | 创建通用分析任务 |
+| `POST` | `/api/inputs/fasta` | 创建内容寻址的 FASTA 输入 |
 | `GET` | `/api/jobs/{job_id}` | 查询任务状态 |
 | `POST` | `/api/jobs/{job_id}/cancel` | 取消任务 |
 | `GET` | `/api/jobs/{job_id}/result` | 获取结构化结果 |
@@ -124,7 +126,14 @@ stateDiagram-v2
 
 ## 7. 分析产物模型
 
-大文件、图片和压缩包不应塞入任务 JSON。建立 `Artifact`：
+大文件、图片和压缩包不应塞入任务 JSON。已建立两类清单：
+
+- `InputArtifact`：跨任务复用的不可变输入，以 `kind + sha256` 去重。
+- `Artifact`：归属于某个任务的输出。
+
+FASTA API 将原文保存在共享 Artifact 根目录的 `inputs/` 中，`AnalysisJob.parameters` 只保存 `input_artifact_id` 和字母表选项。worker 使用前核对文件大小和 SHA-256，避免损坏或被替换的输入进入分析。
+
+输出 `Artifact` 包含：
 
 - `id`
 - `job_id`
@@ -177,7 +186,7 @@ sequenceDiagram
 
 - `backend_health`
 - `get_capabilities`
-- `validate_sequences`
+- `validate_fasta`（已实现）
 - `submit_cis_element_analysis`
 - `submit_gene_family_analysis`
 - `get_job_status`
@@ -231,12 +240,10 @@ sequenceDiagram
 
 ## 12. 当前风险
 
-- PlantCARE 外部等待已移出提交 worker，由 django-q2 Schedule 每分钟批量检查。
-- worker 内长时间 `sleep` 会耗尽执行容量。
-- worker 已取走但未完成的任务缺少可靠公开状态。
-- 当前没有业务任务表和 artifact 表。
-- 当前自动化测试覆盖不足。
-- 生产配置仍需要关闭 `DEBUG`、外置 `SECRET_KEY` 并增加认证。
+- FASTA 输入目前通过 JSON 文本上传；超大数据集后续应增加流式 multipart 或对象存储直传。
+- 本地分析 adapter 尚未覆盖 MAFFT、BLAST/DIAMOND、HMMER 与 IQ-TREE。
+- django-q2 worker 取消属于协作式取消；已经开始运行的外部程序后续需要进程级终止策略。
+- 正式部署仍需要由运维提供随机 `SECRET_KEY`、API Token、TLS 与数据库、Artifact 联合备份。
 
 ## 13. 实施顺序
 
@@ -245,8 +252,9 @@ sequenceDiagram
 3. [x] 统一 `/api/jobs` 契约和 MCP tools。
 4. [x] 完成 PlantCARE submitter、collector 和结构化 parser。
 5. [x] 建立 django-q2 Schedule，移除 worker 内邮箱长轮询。
-6. [ ] 扩展测试、认证和稳定错误码。
-7. [ ] 接入完整基因家族分析工具链。
+6. [x] 扩展测试、认证和稳定错误码。
+7. [x] 建立 FASTA Input Artifact、校验与标准化任务。
+8. [ ] 接入完整基因家族分析工具链。
 
 ## 14. 架构验收标准
 

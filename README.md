@@ -10,9 +10,9 @@ MCP Client  <──stdio──>  mcp_server  <──HTTP/JSON──>  backend_se
                                                      └── 分析结果存储
 ```
 
-当前实现首先提供 PlantCARE 启动子顺式作用元件预测，后续将逐步增加序列校验、同源检索、结构域鉴定、多序列比对、系统发育、保守基序和基因结构分析。
+当前实现提供可复用的 FASTA 校验与标准化，以及 PlantCARE 启动子顺式作用元件预测；后续将逐步增加同源检索、结构域鉴定、多序列比对、系统发育、保守基序和基因结构分析。
 
-> 当前状态：MCP 与后端已经分层，后端具备持久化业务任务、事件、产物清单和 django-q2 ORM 队列。PlantCARE 提交与结果回收已拆成两个阶段，结果由 django-q2 Schedule 每分钟检查；完整基因家族分析工作流尚未实现。
+> 当前状态：MCP 与后端已经分层，后端具备持久化业务任务、事件、输入与输出产物清单和 django-q2 ORM 队列。FASTA 输入按 SHA-256 去重保存，校验任务在 worker 中生成规范化 FASTA 和 JSON 摘要。PlantCARE 提交与结果回收已拆成两个阶段，结果由 django-q2 Schedule 每分钟检查；完整基因家族分析工作流尚未实现。
 
 PlantCARE 邮件附件会经过安全归档检查与结构化解析。`.tab` 结果被转换为 JSON，包含记录总数、序列计数、元件类型计数、各元件频数和完整位点记录；原始归档、HTML、TSV 与 JSON 均作为带 SHA-256 的 Artifact 保存。
 
@@ -37,6 +37,7 @@ MCP 协议适配层，供 Codex、Claude Desktop 等 MCP 客户端连接。
 | --- | --- |
 | `backend_health` | 检查后端 API 是否可用 |
 | `get_capabilities` | 查看可用分析能力与队列后端 |
+| `validate_fasta` | 上传、校验并标准化 DNA 或蛋白 FASTA |
 | `submit_cis_element_analysis` | 提交 DNA 启动子序列分析 |
 | `get_job_status` | 查询业务任务状态与阶段 |
 | `get_job_result` | 获取完成任务的结构化结果和产物 |
@@ -60,6 +61,8 @@ MCP 协议适配层，供 Codex、Claude Desktop 等 MCP 客户端连接。
 | --- | --- | --- |
 | `GET` | `/api/core/health` | 后端健康检查 |
 | `GET` | `/api/core/capabilities` | 分析能力与执行后端 |
+| `POST` | `/api/inputs/fasta` | 上传并按内容去重保存 FASTA 输入 |
+| `GET` | `/api/inputs/{input_artifact_id}/download` | 下载原始输入 |
 | `POST` | `/api/jobs` | 创建通用分析任务 |
 | `GET` | `/api/jobs/{job_id}` | 查询业务任务 |
 | `GET` | `/api/jobs?status=queued&limit=50` | 按状态列出任务 |
@@ -174,6 +177,32 @@ Invoke-RestMethod `
   -Uri http://127.0.0.1:8000/api/jobs/<job_id>
 ```
 
+FASTA 输入先创建 content-addressed Input Artifact，再提交异步任务：
+
+```powershell
+$input = Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8000/api/inputs/fasta `
+  -ContentType application/json `
+  -Body (@{ filename = "family.fa"; content = ">gene1`nACGT`n" } | ConvertTo-Json)
+
+$jobBody = @{
+  analysis_type = "fasta_validation"
+  parameters = @{
+    input_artifact_id = $input.input_artifact_id
+    alphabet = "auto"
+  }
+} | ConvertTo-Json -Depth 3
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8000/api/jobs `
+  -ContentType application/json `
+  -Body $jobBody
+```
+
+`fasta_validation` 检查 FASTA 结构、唯一标识符、DNA/蛋白字母表和容量限制。成功后返回记录数、总残基数、长度统计、检测字母表、DNA GC 比例，以及 `normalized_fasta` 和 `fasta_validation_summary` 两种 Artifact。
+
 ## 目标分析流程
 
 ```mermaid
@@ -199,8 +228,8 @@ flowchart LR
 - [x] 使用业务 UUID 和持久化状态解决任务查询问题。
 - [ ] 为 MCP 与后端通信增加认证、稳定错误码和超时策略。
 - [x] 增加后端 Bearer Token、MCP 凭据转发、请求 ID 与幂等提交。
-- [ ] 增加单元测试、API 集成测试和 MCP 工具测试。
-- [ ] 增加 FASTA 资源上传与 artifact 下载 API。
+- [x] 增加单元测试、API 集成测试和 MCP 工具测试。
+- [x] 增加 FASTA 输入 Artifact、校验、标准化与下载 API。
 - [x] 安全解析 PlantCARE 归档与 `.tab`，生成结构化 JSON Artifact。
 - [ ] 接入 BLAST/DIAMOND、HMMER、MAFFT 和 IQ-TREE。
 
