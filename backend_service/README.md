@@ -61,4 +61,4 @@ Set-Location .\backend_service
 ..\venv\Scripts\python.exe manage.py qcluster
 ```
 
-django-q2 只承担执行队列；对外任务 ID、状态、事件和产物由 `jobs` app 持久化。当前 PlantCARE 的 worker 内长轮询仍需按架构文档继续改为 scheduler 周期检查。
+django-q2 承担执行队列和外部结果调度；对外任务 ID、状态、事件和产物由 `jobs` app 持久化。PlantCARE 提交任务会快速进入 `waiting_external`，由数据库迁移自动创建的 django-q2 Schedule 每分钟批量检查邮箱，不会长期占用提交 worker。

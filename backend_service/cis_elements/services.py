@@ -13,6 +13,10 @@ from urllib.error import HTTPError, URLError
 from django.conf import settings
 
 
+class PlantCareProviderError(RuntimeError):
+    pass
+
+
 def _build_multipart(fields, file_field=None):
     boundary = f'----PlantCAREBoundary{uuid.uuid4().hex}'
     chunks = []
@@ -103,12 +107,7 @@ def _make_random_ref(size=12):
     return ''.join(random.choice(alphabet) for _ in range(size))
 
 
-def run_prediction(
-    sequence: str,
-    output_dir=None,
-    on_submitted=None,
-    on_result_received=None,
-):
+def submit_prediction(sequence: str, ref: str | None = None) -> str:
     email_address = settings.PLANTCARE_EMAIL.strip()
     auth_code = settings.PLANTCARE_AUTH_CODE.strip()
     if not email_address:
@@ -119,7 +118,7 @@ def run_prediction(
     if not sequence:
         raise ValueError('序列不能为空')
 
-    ref = _make_random_ref()
+    ref = ref or _make_random_ref()
     fields = {
         'Field_UserEmail': email_address,
         'Field_REF': ref,
@@ -135,32 +134,37 @@ def run_prediction(
         with request.urlopen(req, timeout=120) as resp:
             content = resp.read().decode('utf-8', errors='replace')
             if 'something is wrong with your email address' in content.lower():
-                raise ValueError('PlantCARE 提示邮箱地址异常')
+                raise PlantCareProviderError('PlantCARE 提示邮箱地址异常')
             if 'has been submitted' not in content.lower():
-                raise ValueError('PlantCARE 提交未确认成功')
+                raise PlantCareProviderError('PlantCARE 提交未确认成功')
     except HTTPError as e:
         body_text = e.read().decode('utf-8', errors='replace')
-        raise RuntimeError(f'提交失败 HTTP {e.code}: {body_text[:500]}') from e
+        raise PlantCareProviderError(
+            f'提交失败 HTTP {e.code}: {body_text[:500]}'
+        ) from e
     except URLError as e:
-        raise RuntimeError(f'提交失败: {e}') from e
+        raise PlantCareProviderError(f'提交失败: {e}') from e
+    return ref
 
-    if on_submitted is not None:
-        on_submitted(ref)
 
-    save_dir = (
-        Path(output_dir)
-        if output_dir is not None
-        else Path(settings.ARTIFACT_ROOT) / ref
-    )
-    save_dir.mkdir(parents=True, exist_ok=True)
+def collect_results(ref_to_output_dir: dict[str, Path]):
+    if not ref_to_output_dir:
+        return {}
+    email_address = settings.PLANTCARE_EMAIL.strip()
+    auth_code = settings.PLANTCARE_AUTH_CODE.strip()
+    if not email_address:
+        raise ValueError('PLANTCARE_EMAIL 未配置')
+    if not auth_code:
+        raise ValueError('PLANTCARE_AUTH_CODE 未配置')
 
+    pending = {ref.lower(): (ref, Path(output_dir)) for ref, output_dir in ref_to_output_dir.items()}
+    results = {}
     with imaplib.IMAP4_SSL(settings.PLANTCARE_IMAP_HOST, settings.PLANTCARE_IMAP_PORT) as imap:
         imap.login(email_address, auth_code)
         status, _ = imap.select(settings.PLANTCARE_IMAP_FOLDER)
         if status != 'OK':
             raise RuntimeError(f'无法打开邮箱文件夹: {settings.PLANTCARE_IMAP_FOLDER}')
-        for _ in range(settings.PLANTCARE_MAX_POLLS):
-            time.sleep(settings.PLANTCARE_POLL_INTERVAL)
+        for ref_lower, (ref, save_dir) in pending.items():
             status, data = imap.uid('search', None, 'TEXT', f'"{ref}"')
             if status != 'OK':
                 continue
@@ -180,15 +184,44 @@ def run_prediction(
                 ref_lower = ref.lower()
                 if ref_lower not in subject.lower() and ref_lower not in body_text.lower():
                     continue
-                if on_result_received is not None:
-                    on_result_received()
+                save_dir.mkdir(parents=True, exist_ok=True)
                 attachments = _save_attachments(message, save_dir)
-                return {
+                results[ref] = {
                     'ref': ref,
                     'subject': subject,
                     'date': date,
                     'attachments': attachments,
                 }
+                break
+    return results
+
+
+def collect_result(ref: str, output_dir) -> dict | None:
+    return collect_results({ref: Path(output_dir)}).get(ref)
+
+
+def run_prediction(
+    sequence: str,
+    output_dir=None,
+    on_submitted=None,
+    on_result_received=None,
+):
+    """Compatibility helper for manual scripts; production uses submit + scheduler."""
+    ref = submit_prediction(sequence)
+    if on_submitted is not None:
+        on_submitted(ref)
+    save_dir = (
+        Path(output_dir)
+        if output_dir is not None
+        else Path(settings.ARTIFACT_ROOT) / ref
+    )
+    for _ in range(settings.PLANTCARE_MAX_POLLS):
+        time.sleep(settings.PLANTCARE_POLL_INTERVAL)
+        result = collect_result(ref, save_dir)
+        if result is not None:
+            if on_result_received is not None:
+                on_result_received()
+            return result
     raise TimeoutError('等待结果超时，请稍后重试')
 
 

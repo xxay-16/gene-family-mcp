@@ -12,7 +12,7 @@ MCP Client  <──stdio──>  mcp_server  <──HTTP/JSON──>  backend_se
 
 当前实现首先提供 PlantCARE 启动子顺式作用元件预测，后续将逐步增加序列校验、同源检索、结构域鉴定、多序列比对、系统发育、保守基序和基因结构分析。
 
-> 当前状态：MCP 与后端已经分层，后端具备持久化业务任务、事件、产物清单和 django-q2 ORM 队列。PlantCARE 仍采用 worker 内邮件轮询，完整基因家族分析工作流尚未实现。
+> 当前状态：MCP 与后端已经分层，后端具备持久化业务任务、事件、产物清单和 django-q2 ORM 队列。PlantCARE 提交与结果回收已拆成两个阶段，结果由 django-q2 Schedule 每分钟检查；完整基因家族分析工作流尚未实现。
 
 ## 两个服务的职责
 
@@ -186,7 +186,7 @@ flowchart LR
 ## 下一阶段
 
 - [x] 建立业务级 `AnalysisJob`、`Artifact` 和 `AnalysisEvent` 表。
-- [ ] 将 PlantCARE 长时间邮箱等待改为 scheduler 周期检查。
+- [x] 将 PlantCARE 长时间邮箱等待改为 django-q2 Schedule 周期检查。
 - [x] 使用业务 UUID 和持久化状态解决任务查询问题。
 - [ ] 为 MCP 与后端通信增加认证、稳定错误码和超时策略。
 - [ ] 增加单元测试、API 集成测试和 MCP 工具测试。

@@ -115,8 +115,8 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 Q_CLUSTER = {
     'name': 'gene_family_backend',
     'workers': 2,
-    'timeout': int(os.getenv('Q_CLUSTER_TIMEOUT', '2100')),
-    'retry': int(os.getenv('Q_CLUSTER_RETRY', '2160')),
+    'timeout': int(os.getenv('Q_CLUSTER_TIMEOUT', '300')),
+    'retry': int(os.getenv('Q_CLUSTER_RETRY', '360')),
     'max_attempts': int(os.getenv('Q_CLUSTER_MAX_ATTEMPTS', '1')),
     'queue_limit': 50,
     'bulk': 10,
@@ -131,6 +131,13 @@ PLANTCARE_IMAP_PORT = int(os.getenv('PLANTCARE_IMAP_PORT', '993'))
 PLANTCARE_IMAP_FOLDER = os.getenv('PLANTCARE_IMAP_FOLDER', 'INBOX')
 PLANTCARE_POLL_INTERVAL = int(os.getenv('PLANTCARE_POLL_INTERVAL', '10'))
 PLANTCARE_MAX_POLLS = int(os.getenv('PLANTCARE_MAX_POLLS', '180'))
+PLANTCARE_RESULT_TIMEOUT = int(
+    os.getenv(
+        'PLANTCARE_RESULT_TIMEOUT',
+        str(PLANTCARE_POLL_INTERVAL * PLANTCARE_MAX_POLLS),
+    )
+)
+PLANTCARE_POLL_BATCH_SIZE = int(os.getenv('PLANTCARE_POLL_BATCH_SIZE', '20'))
 ARTIFACT_ROOT = Path(os.getenv('ARTIFACT_ROOT', BASE_DIR / 'artifacts')).resolve()
 
 SECURE_PROXY_SSL_HEADER = (

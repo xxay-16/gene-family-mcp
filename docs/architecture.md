@@ -142,10 +142,10 @@ MCP 结果只返回结构化摘要和 artifact ID；需要时再读取对应资�
 
 现有 `run_prediction_task` 同时承担提交、等待、邮件解析和文件保存，需要拆成：
 
-1. `PlantCareSubmitter`：提交序列，返回外部 `ref`。
-2. `PlantCareInboxCollector`：单次检查邮箱，不在内部 `sleep`。
-3. `PlantCareResultParser`：安全解包并解析 `.tab`/HTML。
-4. scheduler：周期性寻找 `waiting_external` 任务并检查结果。
+1. [x] `submit_prediction`：提交序列，返回外部 `ref`。
+2. [x] `collect_results`：单次批量检查邮箱，不在内部 `sleep`。
+3. [ ] `PlantCareResultParser`：安全解包并解析 `.tab`/HTML。
+4. [x] django-q2 Schedule：周期性寻找 `waiting_external` 任务并检查结果。
 
 ```mermaid
 sequenceDiagram
@@ -230,7 +230,7 @@ sequenceDiagram
 
 ## 12. 当前风险
 
-- PlantCARE 邮件轮询仍在 worker 内运行；当前 q2 超时已提升为可配置的 2100 秒，这只是过渡措施。
+- PlantCARE 外部等待已移出提交 worker，由 django-q2 Schedule 每分钟批量检查。
 - worker 内长时间 `sleep` 会耗尽执行容量。
 - worker 已取走但未完成的任务缺少可靠公开状态。
 - 当前没有业务任务表和 artifact 表。
@@ -242,8 +242,8 @@ sequenceDiagram
 1. [x] 完成两服务目录和 HTTP 边界。
 2. [x] 建立 `AnalysisJob`、`Artifact`、`AnalysisEvent`。
 3. [x] 统一 `/api/jobs` 契约和 MCP tools。
-4. [ ] 重构 PlantCARE submitter、collector、parser。
-5. [ ] 建立 scheduler，移除 worker 内邮箱长轮询。
+4. [ ] 完成 PlantCARE 附件结构化 parser（submitter 和 collector 已拆分）。
+5. [x] 建立 django-q2 Schedule，移除 worker 内邮箱长轮询。
 6. [ ] 扩展测试、认证和稳定错误码。
 7. [ ] 接入完整基因家族分析工具链。
 

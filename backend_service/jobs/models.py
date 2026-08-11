@@ -30,6 +30,9 @@ class AnalysisJob(models.Model):
     error_code = models.CharField(max_length=64, blank=True)
     error_message = models.TextField(blank=True)
     queue_task_id = models.CharField(max_length=64, blank=True, db_index=True)
+    provider_ref = models.CharField(max_length=128, blank=True, db_index=True)
+    external_deadline = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_polled_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
@@ -72,3 +75,9 @@ class Artifact(models.Model):
 
     class Meta:
         ordering = ['created_at', 'filename']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['job', 'storage_path'],
+                name='unique_job_artifact_path',
+            )
+        ]

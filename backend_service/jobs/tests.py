@@ -1,16 +1,18 @@
 import hashlib
 import tempfile
 import uuid
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 from django.test import Client, TestCase, override_settings
-from django_q.models import OrmQ
+from django.utils import timezone
+from django_q.models import OrmQ, Schedule
 from django_q.signing import SignedPackage
 
 from .models import AnalysisEvent, AnalysisJob, Artifact
 from .services import create_analysis_job
-from .tasks import execute_analysis_job
+from .tasks import execute_analysis_job, poll_waiting_external_jobs
 
 
 class JobAPITests(TestCase):
@@ -80,39 +82,67 @@ class JobExecutionTests(TestCase):
         self.assertEqual(payload['id'], job.queue_task_id)
         self.assertFalse(payload['save'])
 
-    @override_settings()
-    @patch('jobs.tasks.run_prediction')
-    def test_worker_persists_result_artifact_and_events(self, run_prediction_mock):
+    def test_poll_schedule_is_installed_by_migration(self):
+        schedule = Schedule.objects.get(name='gene-family-poll-external-results')
+        self.assertEqual(schedule.func, 'jobs.tasks.poll_waiting_external_jobs')
+        self.assertEqual(schedule.schedule_type, Schedule.MINUTES)
+        self.assertEqual(schedule.minutes, 1)
+        self.assertEqual(schedule.repeats, -1)
+
+    @patch('jobs.tasks.submit_prediction', return_value='provider-ref')
+    def test_submit_worker_releases_into_waiting_external(self, submit_mock):
+        job = AnalysisJob.objects.create(
+            analysis_type=AnalysisJob.AnalysisType.CIS_ELEMENTS,
+            parameters={'sequence': 'ACGT'},
+        )
+
+        result = execute_analysis_job(str(job.id))
+
+        job.refresh_from_db()
+        self.assertEqual(result['status'], AnalysisJob.Status.WAITING_EXTERNAL)
+        self.assertEqual(job.status, AnalysisJob.Status.WAITING_EXTERNAL)
+        self.assertEqual(job.provider_ref, 'provider-ref')
+        self.assertIsNotNone(job.external_deadline)
+        submit_mock.assert_called_once_with('ACGT')
+        self.assertTrue(job.events.filter(event_type='provider_submitted').exists())
+
+    @override_settings(PLANTCARE_POLL_BATCH_SIZE=20)
+    @patch('jobs.tasks.collect_results')
+    def test_scheduler_persists_result_artifact_and_events(self, collect_mock):
         with tempfile.TemporaryDirectory() as temp_dir:
             artifact_root = Path(temp_dir)
             job = AnalysisJob.objects.create(
                 analysis_type=AnalysisJob.AnalysisType.CIS_ELEMENTS,
                 parameters={'sequence': 'ACGT'},
+                status=AnalysisJob.Status.WAITING_EXTERNAL,
+                stage='waiting_plantcare',
+                provider_ref='provider-ref',
+                external_deadline=timezone.now() + timedelta(minutes=30),
             )
             output_dir = artifact_root / str(job.id)
             output_dir.mkdir(parents=True)
             result_file = output_dir / 'plantcare.tab'
             result_file.write_text('motif\tcount\nTATA-box\t2\n', encoding='utf-8')
 
-            def provider(sequence, output_dir, on_submitted, on_result_received):
-                self.assertEqual(sequence, 'ACGT')
-                self.assertEqual(Path(output_dir), artifact_root / str(job.id))
-                on_submitted('provider-ref')
-                on_result_received()
-                return {
+            def collector(ref_to_output_dir):
+                self.assertEqual(
+                    ref_to_output_dir,
+                    {'provider-ref': artifact_root / str(job.id)},
+                )
+                return {'provider-ref': {
                     'ref': 'provider-ref',
                     'subject': 'PlantCARE result',
                     'date': 'today',
                     'attachments': [str(result_file)],
-                }
+                }}
 
-            run_prediction_mock.side_effect = provider
+            collect_mock.side_effect = collector
             with override_settings(ARTIFACT_ROOT=artifact_root):
-                result = execute_analysis_job(str(job.id))
+                result = poll_waiting_external_jobs()
 
             job.refresh_from_db()
             artifact = Artifact.objects.get(job=job)
-            self.assertEqual(result['status'], AnalysisJob.Status.SUCCEEDED)
+            self.assertEqual(result['completed'], 1)
             self.assertEqual(job.status, AnalysisJob.Status.SUCCEEDED)
             self.assertEqual(job.progress, 100)
             self.assertNotIn(str(artifact_root), str(job.result))
@@ -124,18 +154,12 @@ class JobExecutionTests(TestCase):
             self.assertTrue(
                 AnalysisEvent.objects.filter(
                     job=job,
-                    event_type='provider_submitted',
-                ).exists()
-            )
-            self.assertTrue(
-                AnalysisEvent.objects.filter(
-                    job=job,
                     event_type='job_succeeded',
                 ).exists()
             )
 
-    @patch('jobs.tasks.run_prediction', side_effect=TimeoutError('timeout'))
-    def test_worker_records_safe_failure(self, _run_prediction_mock):
+    @patch('jobs.tasks.submit_prediction', side_effect=RuntimeError('provider down'))
+    def test_submit_worker_records_safe_failure(self, _submit_mock):
         job = AnalysisJob.objects.create(
             analysis_type=AnalysisJob.AnalysisType.CIS_ELEMENTS,
             parameters={'sequence': 'ACGT'},
@@ -145,6 +169,51 @@ class JobExecutionTests(TestCase):
 
         job.refresh_from_db()
         self.assertEqual(result['status'], AnalysisJob.Status.FAILED)
-        self.assertEqual(job.error_code, 'PROVIDER_TIMEOUT')
+        self.assertEqual(job.error_code, 'PROVIDER_EXECUTION_FAILED')
         self.assertNotIn('Traceback', job.error_message)
         self.assertTrue(job.events.filter(event_type='job_failed').exists())
+
+    @override_settings(PLANTCARE_POLL_BATCH_SIZE=20)
+    def test_scheduler_expires_waiting_job_without_calling_mailbox(self):
+        job = AnalysisJob.objects.create(
+            analysis_type=AnalysisJob.AnalysisType.CIS_ELEMENTS,
+            parameters={'sequence': 'ACGT'},
+            status=AnalysisJob.Status.WAITING_EXTERNAL,
+            stage='waiting_plantcare',
+            provider_ref='expired-ref',
+            external_deadline=timezone.now() - timedelta(seconds=1),
+        )
+
+        with patch('jobs.tasks.collect_results') as collect_mock:
+            result = poll_waiting_external_jobs()
+
+        job.refresh_from_db()
+        self.assertEqual(result['expired'], 1)
+        self.assertEqual(job.status, AnalysisJob.Status.FAILED)
+        self.assertEqual(job.error_code, 'PROVIDER_TIMEOUT')
+        collect_mock.assert_not_called()
+
+    @override_settings(PLANTCARE_POLL_BATCH_SIZE=20)
+    @patch('jobs.tasks.collect_results', side_effect=OSError('temporary IMAP error'))
+    def test_scheduler_keeps_job_waiting_after_retryable_mail_error(
+        self,
+        _collect_mock,
+    ):
+        job = AnalysisJob.objects.create(
+            analysis_type=AnalysisJob.AnalysisType.CIS_ELEMENTS,
+            parameters={'sequence': 'ACGT'},
+            status=AnalysisJob.Status.WAITING_EXTERNAL,
+            stage='waiting_plantcare',
+            provider_ref='pending-ref',
+            external_deadline=timezone.now() + timedelta(minutes=30),
+        )
+
+        result = poll_waiting_external_jobs()
+
+        job.refresh_from_db()
+        self.assertTrue(result['retryable_error'])
+        self.assertEqual(job.status, AnalysisJob.Status.WAITING_EXTERNAL)
+        self.assertIsNotNone(job.last_polled_at)
+        self.assertTrue(
+            job.events.filter(event_type='provider_poll_failed').exists()
+        )

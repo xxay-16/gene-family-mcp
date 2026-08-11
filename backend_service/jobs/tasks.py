@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+from datetime import timedelta
 from pathlib import Path
 
 from django.conf import settings
 from django.utils import timezone
 
-from cis_elements.services import run_prediction
+from cis_elements.services import collect_results, submit_prediction
 
 from .models import AnalysisJob, Artifact
 from .services import add_event, artifact_payload
@@ -41,16 +42,21 @@ def _register_artifact(job: AnalysisJob, path: Path) -> Artifact:
     resolved_path = path.resolve()
     if not resolved_path.is_relative_to(artifact_root):
         raise ValueError('artifact path is outside ARTIFACT_ROOT')
-    return Artifact.objects.create(
-        job=job,
-        kind='plantcare_attachment',
-        filename=resolved_path.name,
-        storage_path=str(resolved_path.relative_to(artifact_root)),
-        media_type=mimetypes.guess_type(resolved_path.name)[0]
+    storage_path = str(resolved_path.relative_to(artifact_root))
+    defaults = {
+        'kind': 'plantcare_attachment',
+        'filename': resolved_path.name,
+        'media_type': mimetypes.guess_type(resolved_path.name)[0]
         or 'application/octet-stream',
-        size=resolved_path.stat().st_size,
-        sha256=_sha256(resolved_path),
+        'size': resolved_path.stat().st_size,
+        'sha256': _sha256(resolved_path),
+    }
+    artifact, _ = Artifact.objects.update_or_create(
+        job=job,
+        storage_path=storage_path,
+        defaults=defaults,
     )
+    return artifact
 
 
 def _public_result(provider_result: dict, artifacts: list[Artifact]) -> dict:
@@ -70,7 +76,57 @@ def _error_details(exc: Exception) -> tuple[str, str]:
     return 'PROVIDER_EXECUTION_FAILED', 'PlantCARE analysis failed'
 
 
+def _fail_job(job: AnalysisJob, error_code: str, error_message: str, exc=None):
+    if job.status == AnalysisJob.Status.CANCELLED:
+        return
+    job.status = AnalysisJob.Status.FAILED
+    job.stage = 'failed'
+    job.progress = None
+    job.error_code = error_code
+    job.error_message = error_message
+    job.finished_at = timezone.now()
+    job.save(
+        update_fields=[
+            'status',
+            'stage',
+            'progress',
+            'error_code',
+            'error_message',
+            'finished_at',
+            'updated_at',
+        ]
+    )
+    details = {'exception_type': type(exc).__name__} if exc is not None else {}
+    add_event(job, 'job_failed', error_message, details)
+
+
+def _complete_job(job: AnalysisJob, provider_result: dict):
+    output_files = [Path(path) for path in provider_result.get('attachments', [])]
+    artifacts = [_register_artifact(job, path) for path in output_files]
+    job.result = _public_result(provider_result, artifacts)
+    job.status = AnalysisJob.Status.SUCCEEDED
+    job.stage = 'completed'
+    job.progress = 100
+    job.finished_at = timezone.now()
+    job.error_code = ''
+    job.error_message = ''
+    job.save(
+        update_fields=[
+            'result',
+            'status',
+            'stage',
+            'progress',
+            'finished_at',
+            'error_code',
+            'error_message',
+            'updated_at',
+        ]
+    )
+    add_event(job, 'job_succeeded', 'Analysis job completed')
+
+
 def execute_analysis_job(job_id: str) -> dict:
+    """Submit an analysis to its provider, then release the worker."""
     try:
         job = AnalysisJob.objects.get(id=job_id)
     except AnalysisJob.DoesNotExist:
@@ -82,93 +138,132 @@ def execute_analysis_job(job_id: str) -> dict:
     try:
         if not _set_state(job, AnalysisJob.Status.RUNNING, 'submitting', 10):
             return {'job_id': job_id, 'status': job.status}
-
-        output_dir = Path(settings.ARTIFACT_ROOT) / str(job.id)
-
-        def on_submitted(ref: str):
-            job.refresh_from_db()
-            if _set_state(
-                job,
-                AnalysisJob.Status.WAITING_EXTERNAL,
-                'waiting_plantcare',
-                40,
-            ):
-                add_event(
-                    job,
-                    'provider_submitted',
-                    'PlantCARE request submitted',
-                    {'provider_ref': ref},
-                )
-
-        def on_result_received():
-            job.refresh_from_db()
-            _set_state(job, AnalysisJob.Status.RUNNING, 'collecting_result', 80)
-
-        provider_result = run_prediction(
-            job.parameters['sequence'],
-            output_dir=output_dir,
-            on_submitted=on_submitted,
-            on_result_received=on_result_received,
-        )
+        provider_ref = submit_prediction(job.parameters['sequence'])
         job.refresh_from_db()
         if job.status == AnalysisJob.Status.CANCELLED:
             return {'job_id': job_id, 'status': job.status}
 
-        artifacts = [
-            _register_artifact(job, Path(path))
-            for path in provider_result.get('attachments', [])
-        ]
-        job.result = _public_result(provider_result, artifacts)
-        job.status = AnalysisJob.Status.SUCCEEDED
-        job.stage = 'completed'
-        job.progress = 100
-        job.finished_at = timezone.now()
-        job.error_code = ''
-        job.error_message = ''
-        job.save(
-            update_fields=[
-                'result',
-                'status',
-                'stage',
-                'progress',
-                'finished_at',
-                'error_code',
-                'error_message',
-                'updated_at',
-            ]
+        job.provider_ref = provider_ref
+        job.external_deadline = timezone.now() + timedelta(
+            seconds=settings.PLANTCARE_RESULT_TIMEOUT
         )
-        add_event(job, 'job_succeeded', 'Analysis job completed')
-        return {'job_id': job_id, 'status': job.status}
-    except Exception as exc:
-        job.refresh_from_db()
-        if job.status == AnalysisJob.Status.CANCELLED:
-            return {'job_id': job_id, 'status': job.status}
-        error_code, error_message = _error_details(exc)
-        job.status = AnalysisJob.Status.FAILED
-        job.stage = 'failed'
-        job.progress = None
-        job.error_code = error_code
-        job.error_message = error_message
-        job.finished_at = timezone.now()
+        job.status = AnalysisJob.Status.WAITING_EXTERNAL
+        job.stage = 'waiting_plantcare'
+        job.progress = 40
         job.save(
             update_fields=[
+                'provider_ref',
+                'external_deadline',
                 'status',
                 'stage',
                 'progress',
-                'error_code',
-                'error_message',
-                'finished_at',
                 'updated_at',
             ]
         )
         add_event(
             job,
-            'job_failed',
-            error_message,
-            {'exception_type': type(exc).__name__},
+            'provider_submitted',
+            'PlantCARE request submitted',
+            {'provider_ref': provider_ref},
         )
+        return {'job_id': job_id, 'status': job.status}
+    except Exception as exc:
+        job.refresh_from_db()
+        error_code, error_message = _error_details(exc)
+        _fail_job(job, error_code, error_message, exc)
         return {
             'job_id': job_id,
             'status': job.status,
             'error_code': error_code,
         }
+
+
+def poll_waiting_external_jobs() -> dict:
+    """Collect available PlantCARE mail once for a bounded job batch."""
+    now = timezone.now()
+    expired_jobs = list(
+        AnalysisJob.objects.filter(
+            status=AnalysisJob.Status.WAITING_EXTERNAL,
+            external_deadline__lte=now,
+        )[: settings.PLANTCARE_POLL_BATCH_SIZE]
+    )
+    for job in expired_jobs:
+        _fail_job(job, 'PROVIDER_TIMEOUT', 'PlantCARE result collection timed out')
+
+    remaining_capacity = max(
+        settings.PLANTCARE_POLL_BATCH_SIZE - len(expired_jobs),
+        0,
+    )
+    jobs = list(
+        AnalysisJob.objects.filter(
+            status=AnalysisJob.Status.WAITING_EXTERNAL,
+            external_deadline__gt=now,
+        )
+        .exclude(provider_ref='')
+        .order_by('last_polled_at', 'created_at')[:remaining_capacity]
+    )
+    if not jobs:
+        return {
+            'checked': 0,
+            'completed': 0,
+            'expired': len(expired_jobs),
+        }
+
+    ref_to_output_dir = {
+        job.provider_ref: Path(settings.ARTIFACT_ROOT) / str(job.id) for job in jobs
+    }
+    try:
+        results = collect_results(ref_to_output_dir)
+    except ValueError as exc:
+        for job in jobs:
+            _fail_job(job, 'CAPABILITY_UNAVAILABLE', str(exc), exc)
+        return {
+            'checked': len(jobs),
+            'completed': 0,
+            'expired': len(expired_jobs),
+            'failed': len(jobs),
+        }
+    except Exception as exc:
+        for job in jobs:
+            job.last_polled_at = now
+            job.save(update_fields=['last_polled_at', 'updated_at'])
+            add_event(
+                job,
+                'provider_poll_failed',
+                'PlantCARE result check failed; the scheduler will retry',
+                {'exception_type': type(exc).__name__},
+            )
+        return {
+            'checked': len(jobs),
+            'completed': 0,
+            'expired': len(expired_jobs),
+            'retryable_error': True,
+        }
+
+    completed = 0
+    for job in jobs:
+        job.last_polled_at = now
+        job.save(update_fields=['last_polled_at', 'updated_at'])
+        provider_result = results.get(job.provider_ref)
+        if provider_result is None:
+            continue
+        job.refresh_from_db()
+        if job.status != AnalysisJob.Status.WAITING_EXTERNAL:
+            continue
+        _set_state(job, AnalysisJob.Status.RUNNING, 'collecting_result', 80)
+        try:
+            _complete_job(job, provider_result)
+            completed += 1
+        except Exception as exc:
+            _fail_job(
+                job,
+                'RESULT_PROCESSING_FAILED',
+                'PlantCARE result processing failed',
+                exc,
+            )
+
+    return {
+        'checked': len(jobs),
+        'completed': completed,
+        'expired': len(expired_jobs),
+    }
