@@ -1,0 +1,36 @@
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments and local secrets
+venv/
+.venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Django runtime data
+*.sqlite3
+*.sqlite3-journal
+*.log
+staticfiles/
+media/
+
+# PlantCARE generated results and downloaded mail attachments
+plantcare_results/
+plantcare_attachments_*/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini

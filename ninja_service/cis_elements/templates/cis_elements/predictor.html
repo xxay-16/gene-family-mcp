@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>顺式作用元件预测</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 12px; }
+        textarea { width: 100%; min-height: 220px; }
+        button { margin-top: 12px; padding: 8px 16px; }
+        .box { white-space: pre-wrap; background: #f7f7f7; border: 1px solid #ddd; padding: 12px; margin-top: 16px; }
+    </style>
+</head>
+<body>
+    <h1>顺式作用元件预测</h1>
+    <p>粘贴序列后提交，系统会异步运行并自动轮询结果。</p>
+    <textarea id="sequence" placeholder="请输入DNA序列"></textarea>
+    <br>
+    <button id="submitBtn">提交预测</button>
+    <div id="status" class="box">等待提交</div>
+    <div id="result" class="box"></div>
+    <script>
+        const statusEl = document.getElementById('status')
+        const resultEl = document.getElementById('result')
+        const submitBtn = document.getElementById('submitBtn')
+        const sequenceEl = document.getElementById('sequence')
+
+        async function pollTask(taskId) {
+            for (;;) {
+                const resp = await fetch(`/api/cis-elements/tasks/${taskId}`)
+                const data = await resp.json()
+                if (data.status === 'success') {
+                    statusEl.textContent = '任务完成'
+                    resultEl.textContent = JSON.stringify(data.result, null, 2)
+                    return
+                }
+                if (data.status === 'failed') {
+                    statusEl.textContent = '任务失败'
+                    resultEl.textContent = data.error || ''
+                    return
+                }
+                statusEl.textContent = `任务进行中：${data.status}，task_id=${taskId}`
+                await new Promise(resolve => setTimeout(resolve, 3000))
+            }
+        }
+
+        submitBtn.addEventListener('click', async () => {
+            const sequence = sequenceEl.value.trim()
+            if (!sequence) {
+                statusEl.textContent = '请先输入序列'
+                return
+            }
+            statusEl.textContent = '正在提交任务...'
+            resultEl.textContent = ''
+            const resp = await fetch('/api/cis-elements/submit', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sequence })
+            })
+            const data = await resp.json()
+            if (!data.task_id) {
+                statusEl.textContent = '提交失败'
+                resultEl.textContent = JSON.stringify(data, null, 2)
+                return
+            }
+            statusEl.textContent = `提交成功，task_id=${data.task_id}`
+            await pollTask(data.task_id)
+        })
+    </script>
+</body>
+</html>
