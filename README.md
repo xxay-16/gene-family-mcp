@@ -1,6 +1,6 @@
 # Gene Family MCP
 
-面向 AI Agent 的基因家族分析 MCP。仓库明确分成两个独立运行单元：
+Gene Family MCP 是一个纯 API 的基因家族分析服务，供 Codex、Claude Desktop 等 MCP 客户端调用。仓库只有两个运行单元：
 
 ```text
 MCP Client  <──stdio──>  mcp_server  <──HTTP/JSON──>  backend_service
@@ -10,11 +10,9 @@ MCP Client  <──stdio──>  mcp_server  <──HTTP/JSON──>  backend_se
                                                      └── 分析结果存储
 ```
 
-当前实现提供可复用的 FASTA 校验与标准化、MAFFT 多序列比对、FastTree 系统发育树，以及 PlantCARE 启动子顺式作用元件预测；后续将逐步增加同源检索、结构域鉴定、保守基序和基因结构分析。
+`mcp_server` 处理 MCP 协议，`backend_service` 提供 Django Ninja API、django-q2 队列、分析程序适配器和 Artifact 存储。两者只通过 HTTP/JSON 通信。项目没有前端页面、Django 模板或 Admin 路由。
 
-> 当前状态：MCP 与后端已经分层，后端具备持久化业务任务、事件、输入与输出产物清单和 django-q2 ORM 队列。FASTA 输入按 SHA-256 去重保存，校验任务在 worker 中生成规范化 FASTA 和 JSON 摘要。PlantCARE 提交与结果回收已拆成两个阶段，结果由 django-q2 Schedule 每分钟检查；完整基因家族分析工作流尚未实现。
-
-PlantCARE 邮件附件会经过安全归档检查与结构化解析。`.tab` 结果被转换为 JSON，包含记录总数、序列计数、元件类型计数、各元件频数和完整位点记录；原始归档、HTML、TSV 与 JSON 均作为带 SHA-256 的 Artifact 保存。
+目前可以完成 FASTA 校验与标准化、MAFFT 多序列比对、FastTree 系统发育树和 PlantCARE 顺式作用元件预测。其中 `run_sequence_phylogeny` 已把 FASTA → MAFFT → FastTree 串成一个持久化工作流。BLAST/DIAMOND、HMMER、MEME、基因结构分析和 IQ-TREE 尚未接入，因此这还不是完整的基因家族鉴定流水线。
 
 ## 两个服务的职责
 
@@ -93,12 +91,14 @@ gene-family-mcp/
 │   ├── core/                 # 健康检查等基础 API
 │   ├── cis_elements/         # PlantCARE API 与 provider 原型
 │   ├── jobs/                 # 业务任务、事件、产物与 q2 worker 入口
+│   │   └── local_tools/      # MAFFT、FastTree 适配器与能力探测
 │   ├── scripts/              # PlantCARE 独立调试脚本
 │   ├── tests/fixtures/       # 测试输入
 │   ├── manage.py
 │   └── requirements.txt
 ├── docs/
 │   ├── architecture.md       # 架构边界与演进方案
+│   ├── operations.md         # 部署、备份与故障排查
 │   └── plantcare-cli.md      # 独立脚本使用说明
 └── README.md
 ```
@@ -112,15 +112,30 @@ python -m venv venv
 .\venv\Scripts\python.exe -m pip install -r .\requirements-dev.txt
 ```
 
-### 2. 配置 PlantCARE 邮箱
+### 2. 配置后端
 
-使用邮箱 IMAP 授权码，不要使用网页登录密码：
+本地开发可以直接使用 SQLite。建议至少为 API 配置一个随机 Token，并让 MCP 使用同一个值：
+
+```powershell
+$env:BACKEND_API_TOKEN = "replace-with-a-random-token"
+$env:GENE_FAMILY_BACKEND_TOKEN = $env:BACKEND_API_TOKEN
+```
+
+FASTA 校验不依赖外部程序。本机运行 MAFFT 和 FastTree 时，可按安装位置覆盖可执行文件名称或绝对路径：
+
+```powershell
+$env:MAFFT_EXECUTABLE = "mafft"
+$env:FASTTREE_EXECUTABLE = "FastTree"
+```
+
+Docker 后端镜像已经安装 MAFFT 和 FastTree。本机是否可用以 `/api/core/capabilities` 的实时探测结果为准。
+
+只有使用 PlantCARE 时才需要配置邮箱。应填写 IMAP 授权码，不要使用网页登录密码：
 
 ```powershell
 $env:PLANTCARE_EMAIL = "your-email@qq.com"
 $env:PLANTCARE_AUTH_CODE = "your-imap-auth-code"
 $env:PLANTCARE_IMAP_HOST = "imap.qq.com"
-$env:BACKEND_API_TOKEN = "replace-with-a-random-token"
 ```
 
 ### 3. 启动后端 API
@@ -148,7 +163,6 @@ Set-Location .\backend_service
 
 ```powershell
 $env:GENE_FAMILY_BACKEND_URL = "http://127.0.0.1:8000/api"
-$env:GENE_FAMILY_BACKEND_TOKEN = "replace-with-a-random-token"
 .\venv\Scripts\python.exe -m mcp_server.server
 ```
 
@@ -158,6 +172,12 @@ MCP Server 默认使用 `stdio` transport。客户端配置时，命令应指向
 相同幂等键如果携带不同参数会返回 `IDEMPOTENCY_CONFLICT`。后端还可以通过 `MAX_SEQUENCE_LENGTH` 和 `MAX_ACTIVE_JOBS` 限制输入与活跃任务容量。
 
 ## API 示例
+
+以下示例假设后端已配置 `BACKEND_API_TOKEN`：
+
+```powershell
+$headers = @{ Authorization = "Bearer $env:BACKEND_API_TOKEN" }
+```
 
 使用通用任务接口提交分析：
 
@@ -169,6 +189,7 @@ $body = @{
 Invoke-RestMethod `
   -Method Post `
   -Uri http://127.0.0.1:8000/api/jobs `
+  -Headers $headers `
   -ContentType application/json `
   -Body $body
 ```
@@ -177,7 +198,8 @@ Invoke-RestMethod `
 
 ```powershell
 Invoke-RestMethod `
-  -Uri http://127.0.0.1:8000/api/jobs/<job_id>
+  -Uri http://127.0.0.1:8000/api/jobs/<job_id> `
+  -Headers $headers
 ```
 
 FASTA 输入先创建 content-addressed Input Artifact，再提交异步任务：
@@ -186,8 +208,12 @@ FASTA 输入先创建 content-addressed Input Artifact，再提交异步任务�
 $input = Invoke-RestMethod `
   -Method Post `
   -Uri http://127.0.0.1:8000/api/inputs/fasta `
+  -Headers $headers `
   -ContentType application/json `
-  -Body (@{ filename = "family.fa"; content = ">gene1`nACGT`n" } | ConvertTo-Json)
+  -Body (@{
+    filename = "family.fa"
+    content = ">gene1`nACGTACGT`n>gene2`nACGTTCGT`n>gene3`nACGGACGT`n"
+  } | ConvertTo-Json)
 
 $jobBody = @{
   analysis_type = "fasta_validation"
@@ -200,6 +226,7 @@ $jobBody = @{
 Invoke-RestMethod `
   -Method Post `
   -Uri http://127.0.0.1:8000/api/jobs `
+  -Headers $headers `
   -ContentType application/json `
   -Body $jobBody
 ```
@@ -211,6 +238,30 @@ Invoke-RestMethod `
 将 `aligned_fasta` 的 `artifact_id` 提交为 `phylogenetic_tree`，FastTree 会生成经过语法、叶数和安全标签校验的 Newick Artifact。DNA 支持 `auto/gtr/jc`，蛋白支持 `auto/jtt/lg/wag`；`auto` 分别选择 GTR 和 LG。
 
 `run_sequence_phylogeny` 将上述三步组合为一个持久化父任务。父任务使用稳定 UUID，响应中的 `workflow_steps` 显示每个子任务；django-q2 Schedule 每分钟推进已完成依赖，因此 API/worker 重启后仍可继续。最终结果聚合记录数、字母表、比对长度、树叶数和 Newick Artifact。
+
+使用刚才创建的 `$input` 可以直接启动完整工作流：
+
+```powershell
+$workflowBody = @{
+  analysis_type = "sequence_phylogeny"
+  parameters = @{
+    input_artifact_id = $input.input_artifact_id
+    alphabet = "dna"
+    alignment_strategy = "auto"
+    tree_model = "auto"
+    threads = 2
+  }
+} | ConvertTo-Json -Depth 3
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8000/api/jobs `
+  -Headers $headers `
+  -ContentType application/json `
+  -Body $workflowBody
+```
+
+对应的 MCP 调用是 `run_sequence_phylogeny(fasta, alphabet, alignment_strategy, tree_model, threads, filename, idempotency_key)`。调用后用返回的父 `job_id` 查询 `get_job_status` 和 `get_job_result`。
 
 ## 目标分析流程
 
@@ -228,14 +279,14 @@ flowchart LR
     H --> I
 ```
 
-后端负责执行和持久化这一流程；MCP 只提供稳定、面向 Agent 的工具接口。
+当前已实现输入标准化、多序列比对、FastTree 建树和 PlantCARE；同源检索、结构域验证、基因结构、保守基序和完整报告仍是规划能力。后端负责执行和持久化已接入的流程，MCP 只提供稳定的工具接口。
 
 ## 下一阶段
 
 - [x] 建立业务级 `AnalysisJob`、`Artifact` 和 `AnalysisEvent` 表。
 - [x] 将 PlantCARE 长时间邮箱等待改为 django-q2 Schedule 周期检查。
 - [x] 使用业务 UUID 和持久化状态解决任务查询问题。
-- [ ] 为 MCP 与后端通信增加认证、稳定错误码和超时策略。
+- [x] 为 MCP 与后端通信增加认证、稳定错误码和超时策略。
 - [x] 增加后端 Bearer Token、MCP 凭据转发、请求 ID 与幂等提交。
 - [x] 增加单元测试、API 集成测试和 MCP 工具测试。
 - [x] 增加 FASTA 输入 Artifact、校验、标准化与下载 API。
@@ -263,7 +314,7 @@ Windows 开发环境可以运行：
 - 不要提交邮箱授权码和 `.env`。
 - MCP Server 不应接触 provider 密钥。
 - 后端响应不应暴露邮箱正文、绝对路径或完整 traceback。
-- 正式部署需要关闭 Django `DEBUG`、设置随机密钥并增加 API 认证。
+- 正式部署需要关闭 Django `DEBUG`、设置随机密钥，并配置非空的 `BACKEND_API_TOKEN`。
 
 ## License
 
