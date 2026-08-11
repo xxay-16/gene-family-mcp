@@ -84,11 +84,11 @@ MCP Server 只能依赖稳定的公开 API，不依赖后端内部队列表。
 | `GET` | `/api/jobs/{job_id}/result` | 获取结构化结果 |
 | `GET` | `/api/artifacts/{artifact_id}` | 下载分析产物 |
 
-当前 `/api/cis-elements/*` 可以继续作为过渡 API，待通用任务 API 成熟后兼容或迁移。
+通用 `/api/jobs/*` 已实现；`/api/cis-elements/*` 作为兼容 API 保留，返回相同的业务 UUID。
 
 ## 6. 业务任务模型
 
-不能继续用 django-q2 的内部 `Success`、`Failure`、`OrmQ` 直接充当公开任务模型。应建立 `AnalysisJob`：
+已建立 `AnalysisJob`，django-q2 的内部 `Success`、`Failure`、`OrmQ` 不再充当公开任务模型：
 
 | 字段 | 说明 |
 | --- | --- |
@@ -230,7 +230,7 @@ sequenceDiagram
 
 ## 12. 当前风险
 
-- PlantCARE 邮件轮询最长 30 分钟，django-q2 超时只有 90 秒。
+- PlantCARE 邮件轮询仍在 worker 内运行；当前 q2 超时已提升为可配置的 2100 秒，这只是过渡措施。
 - worker 内长时间 `sleep` 会耗尽执行容量。
 - worker 已取走但未完成的任务缺少可靠公开状态。
 - 当前没有业务任务表和 artifact 表。
@@ -239,13 +239,13 @@ sequenceDiagram
 
 ## 13. 实施顺序
 
-1. 完成两服务目录和 HTTP 边界。
-2. 建立 `AnalysisJob`、`Artifact`、`AnalysisEvent`。
-3. 重构 PlantCARE submitter、collector、parser。
-4. 建立 scheduler，移除 worker 内邮箱长轮询。
-5. 统一 `/api/jobs` 契约和 MCP tools。
-6. 增加测试和稳定错误码。
-7. 接入完整基因家族分析工具链。
+1. [x] 完成两服务目录和 HTTP 边界。
+2. [x] 建立 `AnalysisJob`、`Artifact`、`AnalysisEvent`。
+3. [x] 统一 `/api/jobs` 契约和 MCP tools。
+4. [ ] 重构 PlantCARE submitter、collector、parser。
+5. [ ] 建立 scheduler，移除 worker 内邮箱长轮询。
+6. [ ] 扩展测试、认证和稳定错误码。
+7. [ ] 接入完整基因家族分析工具链。
 
 ## 14. 架构验收标准
 

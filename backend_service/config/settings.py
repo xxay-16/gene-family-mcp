@@ -20,13 +20,23 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure--td)*3d3nn@$^$ket*nwym$m91nn@_owzy3sinfi6$$6n$eedh'
+def env_bool(name: str, default: bool = False) -> bool:
+    return os.getenv(name, str(default)).strip().lower() in {'1', 'true', 'yes', 'on'}
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
 
-ALLOWED_HOSTS = ['127.0.0.1', 'localhost', 'testserver']
+DEBUG = env_bool('DJANGO_DEBUG', True)
+SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'django-insecure-local-development-only')
+if not DEBUG and SECRET_KEY == 'django-insecure-local-development-only':
+    raise RuntimeError('DJANGO_SECRET_KEY must be set when DJANGO_DEBUG is false')
+
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.getenv(
+        'DJANGO_ALLOWED_HOSTS',
+        '127.0.0.1,localhost,testserver',
+    ).split(',')
+    if host.strip()
+]
 
 
 # Application definition
@@ -36,12 +46,15 @@ INSTALLED_APPS = [
     'django.contrib.contenttypes',
     'django_q',
     'core',
+    'jobs',
     'cis_elements',
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.middleware.common.CommonMiddleware',
+    'django.middleware.csrf.CsrfViewMiddleware',
+    'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -56,8 +69,12 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': os.getenv('DB_ENGINE', 'django.db.backends.sqlite3'),
+        'NAME': os.getenv('DB_NAME', str(BASE_DIR / 'db.sqlite3')),
+        'USER': os.getenv('DB_USER', ''),
+        'PASSWORD': os.getenv('DB_PASSWORD', ''),
+        'HOST': os.getenv('DB_HOST', ''),
+        'PORT': os.getenv('DB_PORT', ''),
     }
 }
 
@@ -98,8 +115,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 Q_CLUSTER = {
     'name': 'gene_family_backend',
     'workers': 2,
-    'timeout': 90,
-    'retry': 120,
+    'timeout': int(os.getenv('Q_CLUSTER_TIMEOUT', '2100')),
+    'retry': int(os.getenv('Q_CLUSTER_RETRY', '2160')),
+    'max_attempts': int(os.getenv('Q_CLUSTER_MAX_ATTEMPTS', '1')),
     'queue_limit': 50,
     'bulk': 10,
     'orm': 'default',
@@ -113,3 +131,19 @@ PLANTCARE_IMAP_PORT = int(os.getenv('PLANTCARE_IMAP_PORT', '993'))
 PLANTCARE_IMAP_FOLDER = os.getenv('PLANTCARE_IMAP_FOLDER', 'INBOX')
 PLANTCARE_POLL_INTERVAL = int(os.getenv('PLANTCARE_POLL_INTERVAL', '10'))
 PLANTCARE_MAX_POLLS = int(os.getenv('PLANTCARE_MAX_POLLS', '180'))
+ARTIFACT_ROOT = Path(os.getenv('ARTIFACT_ROOT', BASE_DIR / 'artifacts')).resolve()
+
+SECURE_PROXY_SSL_HEADER = (
+    ('HTTP_X_FORWARDED_PROTO', 'https')
+    if env_bool('DJANGO_TRUST_PROXY_SSL_HEADER', False)
+    else None
+)
+SECURE_SSL_REDIRECT = env_bool('DJANGO_SECURE_SSL_REDIRECT', not DEBUG)
+SECURE_HSTS_SECONDS = int(os.getenv('DJANGO_SECURE_HSTS_SECONDS', '0' if DEBUG else '31536000'))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool(
+    'DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS',
+    not DEBUG,
+)
+SECURE_HSTS_PRELOAD = env_bool('DJANGO_SECURE_HSTS_PRELOAD', not DEBUG)
+SESSION_COOKIE_SECURE = env_bool('DJANGO_SESSION_COOKIE_SECURE', not DEBUG)
+CSRF_COOKIE_SECURE = env_bool('DJANGO_CSRF_COOKIE_SECURE', not DEBUG)

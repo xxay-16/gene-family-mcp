@@ -55,12 +55,37 @@ class BackendClient:
     def health(self) -> dict[str, Any]:
         return self._request('GET', '/core/health')
 
-    def submit_cis_element_analysis(self, sequence: str) -> dict[str, Any]:
+    def capabilities(self) -> dict[str, Any]:
+        return self._request('GET', '/core/capabilities')
+
+    def create_job(
+        self,
+        analysis_type: str,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
         return self._request(
             'POST',
-            '/cis-elements/submit',
+            '/jobs',
+            {
+                'analysis_type': analysis_type,
+                'parameters': parameters,
+            },
+        )
+
+    def get_job(self, job_id: str) -> dict[str, Any]:
+        return self._request('GET', f'/jobs/{job_id}')
+
+    def get_job_result(self, job_id: str) -> dict[str, Any]:
+        return self._request('GET', f'/jobs/{job_id}/result')
+
+    def cancel_job(self, job_id: str) -> dict[str, Any]:
+        return self._request('POST', f'/jobs/{job_id}/cancel')
+
+    def submit_cis_element_analysis(self, sequence: str) -> dict[str, Any]:
+        return self.create_job(
+            'cis_elements',
             {'sequence': sequence},
         )
 
     def get_task_status(self, task_id: str) -> dict[str, Any]:
-        return self._request('GET', f'/cis-elements/tasks/{task_id}')
+        return self.get_job(task_id)

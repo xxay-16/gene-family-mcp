@@ -82,7 +82,7 @@ def _save_attachments(message, output_dir):
         disp = str(part.get('Content-Disposition') or '').lower()
         if 'attachment' not in disp:
             continue
-        filename = _decode_text(part.get_filename() or 'attachment.bin')
+        filename = Path(_decode_text(part.get_filename() or 'attachment.bin')).name
         data = part.get_payload(decode=True)
         if data is None:
             continue
@@ -103,7 +103,12 @@ def _make_random_ref(size=12):
     return ''.join(random.choice(alphabet) for _ in range(size))
 
 
-def run_prediction_task(sequence: str):
+def run_prediction(
+    sequence: str,
+    output_dir=None,
+    on_submitted=None,
+    on_result_received=None,
+):
     email_address = settings.PLANTCARE_EMAIL.strip()
     auth_code = settings.PLANTCARE_AUTH_CODE.strip()
     if not email_address:
@@ -139,8 +144,14 @@ def run_prediction_task(sequence: str):
     except URLError as e:
         raise RuntimeError(f'提交失败: {e}') from e
 
-    result_root = Path(settings.BASE_DIR) / 'plantcare_results'
-    save_dir = result_root / ref
+    if on_submitted is not None:
+        on_submitted(ref)
+
+    save_dir = (
+        Path(output_dir)
+        if output_dir is not None
+        else Path(settings.ARTIFACT_ROOT) / ref
+    )
     save_dir.mkdir(parents=True, exist_ok=True)
 
     with imaplib.IMAP4_SSL(settings.PLANTCARE_IMAP_HOST, settings.PLANTCARE_IMAP_PORT) as imap:
@@ -169,14 +180,18 @@ def run_prediction_task(sequence: str):
                 ref_lower = ref.lower()
                 if ref_lower not in subject.lower() and ref_lower not in body_text.lower():
                     continue
+                if on_result_received is not None:
+                    on_result_received()
                 attachments = _save_attachments(message, save_dir)
                 return {
                     'ref': ref,
                     'subject': subject,
-                    'from': sender,
                     'date': date,
-                    'body': body_text[:5000],
                     'attachments': attachments,
-                    'result_dir': str(save_dir),
                 }
     raise TimeoutError('等待结果超时，请稍后重试')
+
+
+def run_prediction_task(sequence: str):
+    """Legacy django-q2 entry point retained for compatibility."""
+    return run_prediction(sequence)

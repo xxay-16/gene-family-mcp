@@ -12,8 +12,11 @@
 ## 当前工具
 
 - `backend_health`
+- `get_capabilities`
 - `submit_cis_element_analysis`
-- `get_cis_element_task`
+- `get_job_status`
+- `get_job_result`
+- `cancel_job`
 
 ## 安装
 

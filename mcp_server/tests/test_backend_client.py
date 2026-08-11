@@ -22,21 +22,47 @@ class _Response:
 
 class BackendClientTests(TestCase):
     @patch('mcp_server.backend_client.request.urlopen')
-    def test_submit_calls_backend_api(self, urlopen_mock):
+    def test_submit_uses_generic_jobs_api(self, urlopen_mock):
         urlopen_mock.return_value = _Response(
-            {'task_id': 'task-123', 'status': 'queued'}
+            {'job_id': 'job-123', 'status': 'queued'}
         )
         client = BackendClient('http://backend.test/api')
 
         result = client.submit_cis_element_analysis('ACGT')
 
-        self.assertEqual(result['task_id'], 'task-123')
+        self.assertEqual(result['job_id'], 'job-123')
         api_request = urlopen_mock.call_args.args[0]
+        self.assertEqual(api_request.full_url, 'http://backend.test/api/jobs')
         self.assertEqual(
-            api_request.full_url,
-            'http://backend.test/api/cis-elements/submit',
+            json.loads(api_request.data),
+            {
+                'analysis_type': 'cis_elements',
+                'parameters': {'sequence': 'ACGT'},
+            },
         )
-        self.assertEqual(json.loads(api_request.data), {'sequence': 'ACGT'})
+
+    @patch('mcp_server.backend_client.request.urlopen')
+    def test_job_operations_use_stable_contract(self, urlopen_mock):
+        urlopen_mock.return_value = _Response({'job_id': 'job-123'})
+        client = BackendClient('http://backend.test/api')
+
+        client.get_job('job-123')
+        self.assertEqual(
+            urlopen_mock.call_args.args[0].full_url,
+            'http://backend.test/api/jobs/job-123',
+        )
+        client.get_job_result('job-123')
+        self.assertEqual(
+            urlopen_mock.call_args.args[0].full_url,
+            'http://backend.test/api/jobs/job-123/result',
+        )
+        client.cancel_job('job-123')
+        cancel_request = urlopen_mock.call_args.args[0]
+        self.assertEqual(
+            cancel_request.full_url,
+            'http://backend.test/api/jobs/job-123/cancel',
+        )
+        self.assertEqual(cancel_request.method, 'POST')
 
     @patch('mcp_server.backend_client.request.urlopen')
     def test_backend_http_error_is_structured(self, urlopen_mock):
@@ -47,12 +73,15 @@ class BackendClientTests(TestCase):
             code=404,
             msg='Not Found',
             hdrs=None,
-            fp=io.BytesIO(b'{"error": "task not found"}'),
+            fp=io.BytesIO(b'{"error": {"code": "JOB_NOT_FOUND"}}'),
         )
         client = BackendClient('http://backend.test/api')
 
         with self.assertRaises(BackendAPIError) as raised:
-            client.get_task_status('missing')
+            client.get_job('missing')
 
         self.assertEqual(raised.exception.status_code, 404)
-        self.assertEqual(raised.exception.detail, {'error': 'task not found'})
+        self.assertEqual(
+            raised.exception.detail,
+            {'error': {'code': 'JOB_NOT_FOUND'}},
+        )

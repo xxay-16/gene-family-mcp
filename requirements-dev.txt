@@ -1,0 +1,4 @@
+-r backend_service/requirements.txt
+-r mcp_server/requirements.txt
+
+coverage==7.10.6

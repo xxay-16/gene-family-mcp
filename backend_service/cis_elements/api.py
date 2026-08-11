@@ -1,61 +1,58 @@
-from django_q.models import Failure, OrmQ, Success
-from django_q.signing import SignedPackage
-from django_q.tasks import async_task
-from ninja import Router
+from uuid import UUID
+
+from ninja import Router, Schema
 from ninja.responses import Response
-from pydantic import BaseModel
+
+from jobs.models import AnalysisJob
+from jobs.services import create_analysis_job, job_payload
 
 router = Router(tags=['cis-elements'])
 
 
-class SequenceIn(BaseModel):
+class SequenceIn(Schema):
     sequence: str
 
 
-def _find_queued_task(task_id: str):
-    for queued_task in OrmQ.objects.all():
-        try:
-            payload = SignedPackage.loads(queued_task.payload)
-        except Exception:
-            continue
-        if payload.get('id') == task_id:
-            return queued_task
-    return None
-
-
-@router.post('/submit')
+@router.post('/submit', response={202: dict})
 def submit_sequence(request, payload: SequenceIn):
-    sequence = ''.join(payload.sequence.split()).upper()
-    if not sequence:
-        return Response({'error': 'sequence must not be empty'}, status=422)
-    if any(base not in 'ACGTN' for base in sequence):
+    try:
+        job = create_analysis_job(
+            AnalysisJob.AnalysisType.CIS_ELEMENTS,
+            {'sequence': payload.sequence},
+        )
+    except ValueError as exc:
         return Response(
-            {'error': 'sequence must contain only A, C, G, T or N'},
+            {'error': {'code': 'INVALID_SEQUENCE', 'message': str(exc)}},
             status=422,
         )
-    task_id = async_task('cis_elements.services.run_prediction_task', sequence)
-    return {'task_id': task_id, 'status': 'queued'}
+    except RuntimeError as exc:
+        return Response(
+            {'error': {'code': 'QUEUE_UNAVAILABLE', 'message': str(exc)}},
+            status=503,
+        )
+    return 202, {
+        **job_payload(job),
+        'task_id': str(job.id),
+    }
 
 
 @router.get('/tasks/{task_id}')
-def query_task(request, task_id: str):
-    success_task = Success.objects.filter(id=task_id).first()
-    if success_task:
-        return {
-            'status': 'success',
-            'task_id': task_id,
-            'result': success_task.result,
-        }
-    failure_task = Failure.objects.filter(id=task_id).first()
-    if failure_task:
-        return {
-            'status': 'failed',
-            'task_id': task_id,
-            'error': str(failure_task.result),
-        }
-    if _find_queued_task(task_id) is not None:
-        return {'status': 'queued', 'task_id': task_id}
-    return Response(
-        {'status': 'not_found', 'task_id': task_id, 'error': 'task not found'},
-        status=404,
-    )
+def query_task(request, task_id: UUID):
+    try:
+        job = AnalysisJob.objects.prefetch_related('artifacts').get(id=task_id)
+    except AnalysisJob.DoesNotExist:
+        return Response(
+            {
+                'status': 'not_found',
+                'task_id': str(task_id),
+                'error': {'code': 'JOB_NOT_FOUND', 'message': 'Analysis job not found'},
+            },
+            status=404,
+        )
+    return {
+        **job_payload(
+            job,
+            include_result=job.status == AnalysisJob.Status.SUCCEEDED,
+        ),
+        'task_id': str(job.id),
+    }

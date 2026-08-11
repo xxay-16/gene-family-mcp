@@ -16,6 +16,8 @@ env/
 .env
 .env.*
 !.env.example
+.coverage
+htmlcov/
 
 # Django runtime data
 *.sqlite3
@@ -27,6 +29,7 @@ media/
 # PlantCARE generated results and downloaded mail attachments
 plantcare_results/
 plantcare_attachments_*/
+artifacts/
 
 # Editors and operating systems
 .idea/

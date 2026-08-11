@@ -17,6 +17,12 @@ Gene Family MCP 的 API 与任务执行后端，基于 Django、Django Ninja 和
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/api/core/health` | 健康检查 |
+| `GET` | `/api/core/capabilities` | 查询分析能力和队列后端 |
+| `POST` | `/api/jobs` | 创建业务任务 |
+| `GET` | `/api/jobs/{job_id}` | 查询任务状态 |
+| `GET` | `/api/jobs/{job_id}/result` | 获取结果和产物清单 |
+| `POST` | `/api/jobs/{job_id}/cancel` | 取消任务 |
+| `GET` | `/api/artifacts/{artifact_id}/download` | 下载分析产物 |
 | `POST` | `/api/cis-elements/submit` | 提交顺式元件预测 |
 | `GET` | `/api/cis-elements/tasks/{task_id}` | 查询任务状态或结果 |
 | `GET` | `/api/docs` | OpenAPI 文档 |
@@ -55,4 +61,4 @@ Set-Location .\backend_service
 ..\venv\Scripts\python.exe manage.py qcluster
 ```
 
-当前 PlantCARE 的长轮询与任务超时仍需按架构文档继续重构。
+django-q2 只承担执行队列；对外任务 ID、状态、事件和产物由 `jobs` app 持久化。当前 PlantCARE 的 worker 内长轮询仍需按架构文档继续改为 scheduler 周期检查。

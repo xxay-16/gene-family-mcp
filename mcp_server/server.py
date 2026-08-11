@@ -14,19 +14,37 @@ def backend_health() -> dict:
 
 
 @mcp.tool()
+def get_capabilities() -> dict:
+    """List analysis types and execution backends available on the service."""
+    return backend.capabilities()
+
+
+@mcp.tool()
 def submit_cis_element_analysis(sequence: str) -> dict:
     """Submit a DNA promoter sequence for PlantCARE cis-element analysis.
 
     The backend accepts A, C, G, T and N characters. The operation is
-    asynchronous and returns a task_id for later status queries.
+    asynchronous and returns a stable job_id for later status queries.
     """
     return backend.submit_cis_element_analysis(sequence)
 
 
 @mcp.tool()
-def get_cis_element_task(task_id: str) -> dict:
-    """Get the current state or result of a cis-element analysis task."""
-    return backend.get_task_status(task_id)
+def get_job_status(job_id: str) -> dict:
+    """Get the current state and progress of an analysis job."""
+    return backend.get_job(job_id)
+
+
+@mcp.tool()
+def get_job_result(job_id: str) -> dict:
+    """Get the structured result and artifact manifest for a completed job."""
+    return backend.get_job_result(job_id)
+
+
+@mcp.tool()
+def cancel_job(job_id: str) -> dict:
+    """Cancel an analysis job that has not reached a terminal state."""
+    return backend.cancel_job(job_id)
 
 
 def main():

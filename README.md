@@ -12,7 +12,7 @@ MCP Client  <──stdio──>  mcp_server  <──HTTP/JSON──>  backend_se
 
 当前实现首先提供 PlantCARE 启动子顺式作用元件预测，后续将逐步增加序列校验、同源检索、结构域鉴定、多序列比对、系统发育、保守基序和基因结构分析。
 
-> 当前状态：MCP 与后端的分层骨架已经建立，但 PlantCARE 异步任务模型仍是原型，完整基因家族分析工作流尚未实现。
+> 当前状态：MCP 与后端已经分层，后端具备持久化业务任务、事件、产物清单和 django-q2 ORM 队列。PlantCARE 仍采用 worker 内邮件轮询，完整基因家族分析工作流尚未实现。
 
 ## 两个服务的职责
 
@@ -34,8 +34,11 @@ MCP 协议适配层，供 Codex、Claude Desktop 等 MCP 客户端连接。
 | Tool | 说明 |
 | --- | --- |
 | `backend_health` | 检查后端 API 是否可用 |
+| `get_capabilities` | 查看可用分析能力与队列后端 |
 | `submit_cis_element_analysis` | 提交 DNA 启动子序列分析 |
-| `get_cis_element_task` | 查询任务状态或结果 |
+| `get_job_status` | 查询业务任务状态与阶段 |
+| `get_job_result` | 获取完成任务的结构化结果和产物 |
+| `cancel_job` | 取消未结束任务 |
 
 ### `backend_service`
 
@@ -54,6 +57,12 @@ MCP 协议适配层，供 Codex、Claude Desktop 等 MCP 客户端连接。
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/api/core/health` | 后端健康检查 |
+| `GET` | `/api/core/capabilities` | 分析能力与执行后端 |
+| `POST` | `/api/jobs` | 创建通用分析任务 |
+| `GET` | `/api/jobs/{job_id}` | 查询业务任务 |
+| `GET` | `/api/jobs/{job_id}/result` | 获取结果与产物清单 |
+| `POST` | `/api/jobs/{job_id}/cancel` | 取消任务 |
+| `GET` | `/api/artifacts/{artifact_id}/download` | 下载产物 |
 | `POST` | `/api/cis-elements/submit` | 提交顺式作用元件分析 |
 | `GET` | `/api/cis-elements/tasks/{task_id}` | 查询状态或结果 |
 | `GET` | `/api/docs` | OpenAPI 文档 |
@@ -73,6 +82,7 @@ gene-family-mcp/
 │   ├── config/               # Django 配置与 API 路由
 │   ├── core/                 # 健康检查等基础 API
 │   ├── cis_elements/         # PlantCARE API 与 provider 原型
+│   ├── jobs/                 # 业务任务、事件、产物与 q2 worker 入口
 │   ├── scripts/              # PlantCARE 独立调试脚本
 │   ├── tests/fixtures/       # 测试输入
 │   ├── manage.py
@@ -89,8 +99,7 @@ gene-family-mcp/
 
 ```powershell
 python -m venv venv
-.\venv\Scripts\python.exe -m pip install -r .\backend_service\requirements.txt
-.\venv\Scripts\python.exe -m pip install -r .\mcp_server\requirements.txt
+.\venv\Scripts\python.exe -m pip install -r .\requirements-dev.txt
 ```
 
 ### 2. 配置 PlantCARE 邮箱
@@ -135,13 +144,16 @@ MCP Server 默认使用 `stdio` transport。客户端配置时，命令应指向
 
 ## API 示例
 
-提交分析：
+使用通用任务接口提交分析：
 
 ```powershell
-$body = @{ sequence = "ACGTACGTNNACGT" } | ConvertTo-Json
+$body = @{
+  analysis_type = "cis_elements"
+  parameters = @{ sequence = "ACGTACGTNNACGT" }
+} | ConvertTo-Json -Depth 3
 Invoke-RestMethod `
   -Method Post `
-  -Uri http://127.0.0.1:8000/api/cis-elements/submit `
+  -Uri http://127.0.0.1:8000/api/jobs `
   -ContentType application/json `
   -Body $body
 ```
@@ -150,7 +162,7 @@ Invoke-RestMethod `
 
 ```powershell
 Invoke-RestMethod `
-  -Uri http://127.0.0.1:8000/api/cis-elements/tasks/<task_id>
+  -Uri http://127.0.0.1:8000/api/jobs/<job_id>
 ```
 
 ## 目标分析流程
@@ -173,13 +185,23 @@ flowchart LR
 
 ## 下一阶段
 
-- [ ] 建立业务级 `AnalysisJob`、`Artifact` 和 `AnalysisEvent` 表。
+- [x] 建立业务级 `AnalysisJob`、`Artifact` 和 `AnalysisEvent` 表。
 - [ ] 将 PlantCARE 长时间邮箱等待改为 scheduler 周期检查。
-- [ ] 解决运行中任务无法可靠查询的问题。
+- [x] 使用业务 UUID 和持久化状态解决任务查询问题。
 - [ ] 为 MCP 与后端通信增加认证、稳定错误码和超时策略。
 - [ ] 增加单元测试、API 集成测试和 MCP 工具测试。
 - [ ] 增加 FASTA 资源上传与 artifact 下载 API。
 - [ ] 接入 BLAST/DIAMOND、HMMER、MAFFT 和 IQ-TREE。
+
+## 工程检查
+
+Windows 开发环境可以运行：
+
+```powershell
+.\scripts\check.ps1
+```
+
+该命令执行 Django 系统检查、迁移漂移检查、后端测试、MCP 测试、Python 编译和 Git diff 检查。GitHub Actions 会在 push 和 pull request 时执行对应检查。
 
 更详细的状态模型、数据模型和迁移计划见 [架构文档](docs/architecture.md)。
 
