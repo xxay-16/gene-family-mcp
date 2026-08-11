@@ -10,7 +10,7 @@ MCP Client  <──stdio──>  mcp_server  <──HTTP/JSON──>  backend_se
                                                      └── 分析结果存储
 ```
 
-当前实现提供可复用的 FASTA 校验与标准化，以及 PlantCARE 启动子顺式作用元件预测；后续将逐步增加同源检索、结构域鉴定、多序列比对、系统发育、保守基序和基因结构分析。
+当前实现提供可复用的 FASTA 校验与标准化、MAFFT 多序列比对，以及 PlantCARE 启动子顺式作用元件预测；后续将逐步增加同源检索、结构域鉴定、系统发育、保守基序和基因结构分析。
 
 > 当前状态：MCP 与后端已经分层，后端具备持久化业务任务、事件、输入与输出产物清单和 django-q2 ORM 队列。FASTA 输入按 SHA-256 去重保存，校验任务在 worker 中生成规范化 FASTA 和 JSON 摘要。PlantCARE 提交与结果回收已拆成两个阶段，结果由 django-q2 Schedule 每分钟检查；完整基因家族分析工作流尚未实现。
 
@@ -38,6 +38,7 @@ MCP 协议适配层，供 Codex、Claude Desktop 等 MCP 客户端连接。
 | `backend_health` | 检查后端 API 是否可用 |
 | `get_capabilities` | 查看可用分析能力与队列后端 |
 | `validate_fasta` | 上传、校验并标准化 DNA 或蛋白 FASTA |
+| `align_sequences` | 使用 MAFFT 对规范化 FASTA Artifact 进行多序列比对 |
 | `submit_cis_element_analysis` | 提交 DNA 启动子序列分析 |
 | `get_job_status` | 查询业务任务状态与阶段 |
 | `get_job_result` | 获取完成任务的结构化结果和产物 |
@@ -203,6 +204,8 @@ Invoke-RestMethod `
 
 `fasta_validation` 检查 FASTA 结构、唯一标识符、DNA/蛋白字母表和容量限制。成功后返回记录数、总残基数、长度统计、检测字母表、DNA GC 比例，以及 `normalized_fasta` 和 `fasta_validation_summary` 两种 Artifact。
 
+将 `normalized_fasta` 的 `artifact_id` 提交为 `multiple_sequence_alignment`，即可使用 MAFFT 生成 `aligned_fasta`。支持 `auto`、`linsi`、`ginsi` 和 `einsi` 策略；运行前应查询 `/api/core/capabilities`，因为本机安装模式下 MAFFT 是可选依赖，生产 Docker 镜像则已显式安装。
+
 ## 目标分析流程
 
 ```mermaid
@@ -231,7 +234,8 @@ flowchart LR
 - [x] 增加单元测试、API 集成测试和 MCP 工具测试。
 - [x] 增加 FASTA 输入 Artifact、校验、标准化与下载 API。
 - [x] 安全解析 PlantCARE 归档与 `.tab`，生成结构化 JSON Artifact。
-- [ ] 接入 BLAST/DIAMOND、HMMER、MAFFT 和 IQ-TREE。
+- [x] 接入 MAFFT 多序列比对 adapter、能力探测和 Artifact 溯源。
+- [ ] 接入 BLAST/DIAMOND、HMMER 和 IQ-TREE。
 
 ## 工程检查
 

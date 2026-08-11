@@ -53,6 +53,27 @@ def validate_fasta(
 
 
 @mcp.tool()
+def align_sequences(
+    artifact_id: str,
+    strategy: str = 'auto',
+    threads: int = 2,
+    idempotency_key: str = '',
+) -> dict:
+    """Align a validated FASTA Artifact asynchronously with MAFFT.
+
+    artifact_id must refer to the normalized_fasta output of a successful
+    validate_fasta job. Strategies are auto, linsi, ginsi and einsi. Check
+    get_capabilities first because MAFFT is an optional backend runtime.
+    """
+    return backend.submit_multiple_sequence_alignment(
+        artifact_id,
+        strategy,
+        threads,
+        idempotency_key,
+    )
+
+
+@mcp.tool()
 def get_job_status(job_id: str) -> dict:
     """Get the current state and progress of an analysis job."""
     return backend.get_job(job_id)

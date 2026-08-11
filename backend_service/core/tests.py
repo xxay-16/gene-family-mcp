@@ -28,6 +28,12 @@ class HealthAPITests(TestCase):
         self.assertEqual(unauthorized.status_code, 401)
         self.assertEqual(unauthorized.json()['error']['code'], 'UNAUTHORIZED')
         self.assertEqual(authorized.status_code, 200)
+        alignment = authorized.json()['analysis_types'][
+            'multiple_sequence_alignment'
+        ]
+        self.assertIn(alignment['status'], {'available', 'unavailable'})
+        self.assertNotIn('resolved_executable', alignment['runtime'])
+        self.assertNotIn('configured_executable', alignment['runtime'])
         self.assertEqual(health.status_code, 200)
 
     def test_ready_endpoint_checks_database_and_schedule(self):

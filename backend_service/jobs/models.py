@@ -7,6 +7,10 @@ class AnalysisJob(models.Model):
     class AnalysisType(models.TextChoices):
         CIS_ELEMENTS = 'cis_elements', 'Cis-element analysis'
         FASTA_VALIDATION = 'fasta_validation', 'FASTA validation and normalization'
+        MULTIPLE_SEQUENCE_ALIGNMENT = (
+            'multiple_sequence_alignment',
+            'Multiple sequence alignment',
+        )
 
     class Status(models.TextChoices):
         QUEUED = 'queued', 'Queued'

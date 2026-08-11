@@ -254,7 +254,8 @@ sequenceDiagram
 5. [x] 建立 django-q2 Schedule，移除 worker 内邮箱长轮询。
 6. [x] 扩展测试、认证和稳定错误码。
 7. [x] 建立 FASTA Input Artifact、校验与标准化任务。
-8. [ ] 接入完整基因家族分析工具链。
+8. [x] 建立 MAFFT adapter、运行时能力探测和 Artifact 串联。
+9. [ ] 接入完整基因家族分析工具链。
 
 ## 14. 架构验收标准
 

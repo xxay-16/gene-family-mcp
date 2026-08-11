@@ -1,5 +1,6 @@
 from django.db import connection
 from django_q.models import Schedule
+from jobs.local_tools.capabilities import mafft_capability
 from ninja import Router
 from ninja.responses import Response
 
@@ -44,6 +45,7 @@ def ready(request):
 
 @router.get('/capabilities')
 def capabilities(request):
+    mafft = mafft_capability()
     return {
         'service': 'gene-family-backend',
         'queue_backend': 'django-q2',
@@ -66,6 +68,14 @@ def capabilities(request):
                 'input': 'DNA promoter sequence',
                 'alphabet': 'ACGTN',
                 'asynchronous': True,
-            }
+            },
+            'multiple_sequence_alignment': {
+                'status': 'available' if mafft['available'] else 'unavailable',
+                'provider': 'MAFFT',
+                'input': 'normalized_fasta Artifact from a succeeded job',
+                'strategies': ['auto', 'linsi', 'ginsi', 'einsi'],
+                'asynchronous': True,
+                'runtime': mafft,
+            },
         },
     }

@@ -13,7 +13,12 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from .fasta import parse_and_normalize_fasta
+from .fasta import parse_and_normalize_fasta, summarize_fasta_alignment
+from .local_tools.mafft import (
+    ToolExecutionError,
+    ToolUnavailableError,
+    run_mafft,
+)
 from .models import AnalysisJob, Artifact
 from .services import add_event, artifact_payload
 
@@ -300,6 +305,110 @@ def _execute_fasta_validation(job: AnalysisJob) -> dict:
     return {'job_id': str(job.id), 'status': job.status}
 
 
+def _execute_multiple_sequence_alignment(job: AnalysisJob) -> dict:
+    if not _set_state(job, AnalysisJob.Status.RUNNING, 'running_mafft', 20):
+        return {'job_id': str(job.id), 'status': job.status}
+    source_artifact = Artifact.objects.select_related('job').get(
+        id=job.parameters['artifact_id'],
+        kind='normalized_fasta',
+        job__status=AnalysisJob.Status.SUCCEEDED,
+    )
+    source_summary = source_artifact.job.result.get('summary', {})
+    if source_summary.get('record_count', 0) < 2:
+        raise ValueError('multiple sequence alignment requires at least two sequences')
+    source_alphabet = source_artifact.metadata.get(
+        'alphabet',
+        source_summary.get('alphabet', ''),
+    )
+    if source_alphabet not in {'dna', 'protein'}:
+        raise ValueError('source FASTA artifact has no supported alphabet metadata')
+
+    artifact_root = Path(settings.ARTIFACT_ROOT).resolve()
+    input_path = (artifact_root / source_artifact.storage_path).resolve()
+    if not input_path.is_relative_to(artifact_root) or not input_path.is_file():
+        raise ValueError('source FASTA artifact file is unavailable')
+    if input_path.stat().st_size != source_artifact.size:
+        raise ValueError('source FASTA artifact size does not match its manifest')
+    if _sha256(input_path) != source_artifact.sha256:
+        raise ValueError('source FASTA artifact checksum does not match its manifest')
+
+    output_dir = artifact_root / str(job.id)
+    output_path = output_dir / 'aligned.fasta'
+    run_metadata = run_mafft(
+        input_path,
+        output_path,
+        strategy=job.parameters['strategy'],
+        threads=job.parameters['threads'],
+        timeout=settings.MAFFT_TIMEOUT,
+    )
+    alignment_text = output_path.read_text(encoding='utf-8-sig')
+    summary = summarize_fasta_alignment(
+        alignment_text,
+        alphabet=source_alphabet,
+    )
+
+    with transaction.atomic():
+        locked_job = AnalysisJob.objects.select_for_update().get(id=job.id)
+        if locked_job.status == AnalysisJob.Status.CANCELLED:
+            output_path.unlink(missing_ok=True)
+            return {'job_id': str(job.id), 'status': locked_job.status}
+        artifact = _register_artifact(
+            locked_job,
+            output_path,
+            kind='aligned_fasta',
+            media_type='text/x-fasta',
+            metadata={
+                'tool': 'MAFFT',
+                'tool_version': run_metadata['version'],
+                'strategy': run_metadata['strategy'],
+                'threads': run_metadata['threads'],
+                'source_artifact_id': str(source_artifact.id),
+                'alphabet': source_alphabet,
+            },
+        )
+        locked_job.result = {
+            'summary': summary,
+            'tool': {
+                'name': 'MAFFT',
+                'version': run_metadata['version'],
+                'strategy': run_metadata['strategy'],
+                'threads': run_metadata['threads'],
+            },
+            'source_artifact_id': str(source_artifact.id),
+            'artifacts': [artifact_payload(artifact)],
+        }
+        locked_job.status = AnalysisJob.Status.SUCCEEDED
+        locked_job.stage = 'completed'
+        locked_job.progress = 100
+        locked_job.finished_at = timezone.now()
+        locked_job.error_code = ''
+        locked_job.error_message = ''
+        locked_job.lease_expires_at = None
+        locked_job.save(
+            update_fields=[
+                'result',
+                'status',
+                'stage',
+                'progress',
+                'finished_at',
+                'error_code',
+                'error_message',
+                'lease_expires_at',
+                'updated_at',
+            ]
+        )
+        add_event(
+            locked_job,
+            'job_succeeded',
+            'Multiple sequence alignment completed with MAFFT',
+            {
+                'record_count': summary['record_count'],
+                'alignment_length': summary['alignment_length'],
+            },
+        )
+    return {'job_id': str(job.id), 'status': AnalysisJob.Status.SUCCEEDED}
+
+
 def _submit_cis_element_analysis(job: AnalysisJob) -> dict:
     if not _set_state(job, AnalysisJob.Status.RUNNING, 'submitting', 10):
         return {'job_id': str(job.id), 'status': job.status}
@@ -346,14 +455,19 @@ def execute_analysis_job(job_id: str) -> dict:
     if job.status == AnalysisJob.Status.CANCELLED:
         return {'job_id': job_id, 'status': job.status}
     now = timezone.now()
+    lease_seconds = settings.JOB_EXECUTION_LEASE_SECONDS
+    if (
+        job.analysis_type
+        == AnalysisJob.AnalysisType.MULTIPLE_SEQUENCE_ALIGNMENT
+    ):
+        lease_seconds = max(lease_seconds, settings.MAFFT_TIMEOUT + 60)
     claimed = AnalysisJob.objects.filter(
         id=job_id,
         status=AnalysisJob.Status.QUEUED,
     ).filter(
         Q(lease_expires_at__isnull=True) | Q(lease_expires_at__lte=now)
     ).update(
-        lease_expires_at=now
-        + timedelta(seconds=settings.JOB_EXECUTION_LEASE_SECONDS)
+        lease_expires_at=now + timedelta(seconds=lease_seconds)
     )
     if not claimed:
         job.refresh_from_db()
@@ -365,6 +479,11 @@ def execute_analysis_job(job_id: str) -> dict:
             return _submit_cis_element_analysis(job)
         if job.analysis_type == AnalysisJob.AnalysisType.FASTA_VALIDATION:
             return _execute_fasta_validation(job)
+        if (
+            job.analysis_type
+            == AnalysisJob.AnalysisType.MULTIPLE_SEQUENCE_ALIGNMENT
+        ):
+            return _execute_multiple_sequence_alignment(job)
         raise ValueError(f'unsupported analysis type: {job.analysis_type}')
     except Exception as exc:
         job.refresh_from_db()
@@ -374,6 +493,26 @@ def execute_analysis_job(job_id: str) -> dict:
             )
             error_message = (
                 str(exc) if isinstance(exc, ValueError) else 'FASTA processing failed'
+            )
+        elif (
+            job.analysis_type
+            == AnalysisJob.AnalysisType.MULTIPLE_SEQUENCE_ALIGNMENT
+        ):
+            if isinstance(exc, ToolUnavailableError):
+                error_code = 'CAPABILITY_UNAVAILABLE'
+            elif isinstance(exc, ToolExecutionError):
+                error_code = 'TOOL_EXECUTION_FAILED'
+            elif isinstance(exc, ValueError):
+                error_code = 'INVALID_ALIGNMENT_INPUT'
+            else:
+                error_code = 'ALIGNMENT_PROCESSING_FAILED'
+            error_message = (
+                str(exc)
+                if isinstance(
+                    exc,
+                    ToolUnavailableError | ToolExecutionError | ValueError,
+                )
+                else 'Multiple sequence alignment failed'
             )
         else:
             error_code, error_message = _error_details(exc)

@@ -14,6 +14,7 @@
 - `backend_health`
 - `get_capabilities`
 - `validate_fasta`
+- `align_sequences`
 - `submit_cis_element_analysis`
 - `get_job_status`
 - `get_job_result`
@@ -45,3 +46,5 @@ $env:GENE_FAMILY_BACKEND_TOKEN = "replace-with-a-random-token"
 MCP Server 默认使用 `stdio` transport。
 
 `validate_fasta(fasta, alphabet, filename, idempotency_key)` 先通过 API 创建内容寻址的输入 Artifact，再提交 `fasta_validation` django-q2 任务。`alphabet` 支持 `auto`、`dna` 和 `protein`。工具立即返回 `job_id`，结果通过 `get_job_result` 获取。
+
+`align_sequences(artifact_id, strategy, threads, idempotency_key)` 消费校验任务的 `normalized_fasta` Artifact，并提交 MAFFT 异步任务。调用前可通过 `get_capabilities` 确认部署环境中的 MAFFT 状态。

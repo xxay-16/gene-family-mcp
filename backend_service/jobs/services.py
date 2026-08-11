@@ -89,6 +89,37 @@ def create_analysis_job(
             'input_artifact_id': str(input_artifact.id),
             'alphabet': alphabet,
         }
+    elif analysis_type == AnalysisJob.AnalysisType.MULTIPLE_SEQUENCE_ALIGNMENT:
+        artifact_id = str(parameters.get('artifact_id', '')).strip()
+        try:
+            parsed_artifact_id = uuid.UUID(artifact_id)
+        except ValueError as exc:
+            raise ValueError('artifact_id must be a valid UUID') from exc
+        source_artifact = Artifact.objects.select_related('job').filter(
+            id=parsed_artifact_id,
+            kind='normalized_fasta',
+            job__status=AnalysisJob.Status.SUCCEEDED,
+        ).first()
+        if source_artifact is None:
+            raise ValueError(
+                'normalized FASTA artifact from a succeeded job was not found'
+            )
+        strategy = str(parameters.get('strategy', 'auto')).strip().lower()
+        if strategy not in {'auto', 'linsi', 'ginsi', 'einsi'}:
+            raise ValueError('strategy must be one of: auto, einsi, ginsi, linsi')
+        try:
+            threads = int(parameters.get('threads', settings.MAFFT_DEFAULT_THREADS))
+        except (TypeError, ValueError) as exc:
+            raise ValueError('threads must be an integer') from exc
+        if not 1 <= threads <= settings.MAX_TOOL_THREADS:
+            raise ValueError(
+                f'threads must be between 1 and {settings.MAX_TOOL_THREADS}'
+            )
+        normalized_parameters = {
+            'artifact_id': str(source_artifact.id),
+            'strategy': strategy,
+            'threads': threads,
+        }
 
     normalized_idempotency_key = idempotency_key.strip()
     if len(normalized_idempotency_key) > 128:
@@ -131,11 +162,19 @@ def create_analysis_job(
         return existing_job, False
 
     try:
+        queue_options = {
+            'task_name': f'analysis-job-{job.id}',
+            'save': False,
+        }
+        if (
+            analysis_type
+            == AnalysisJob.AnalysisType.MULTIPLE_SEQUENCE_ALIGNMENT
+        ):
+            queue_options['timeout'] = settings.MAFFT_TIMEOUT + 30
         queue_task_id = async_task(
             'jobs.tasks.execute_analysis_job',
             str(job.id),
-            task_name=f'analysis-job-{job.id}',
-            save=False,
+            **queue_options,
         )
     except Exception as exc:
         job.status = AnalysisJob.Status.FAILED

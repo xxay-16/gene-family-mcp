@@ -86,10 +86,12 @@ Compose 将 `/data/artifacts` 挂载到 `artifact-data` volume。输入和输出
 ## 6. django-q2
 
 - ORM 队列名称：`gene_family_backend`。
-- 普通任务超时默认 300 秒，重试锁默认 360 秒。
+- 普通任务超时默认 300 秒；ORM 重试锁默认 1890 秒，严格大于 MAFFT 的 1830 秒 django-q2 task timeout，避免长任务被重复领取。
 - `max_attempts=1`，业务失败由 `AnalysisJob` 记录并显式处理。
 - `MAX_SEQUENCE_LENGTH` 和 `MAX_ACTIVE_JOBS` 提供基础资源保护。
 - `MAX_FASTA_INPUT_BYTES`、`MAX_FASTA_RECORDS`、`MAX_FASTA_SEQUENCE_LENGTH`、`MAX_FASTA_TOTAL_RESIDUES` 和 `MAX_FASTA_HEADER_LENGTH` 限制 FASTA 资源。
+- `MAFFT_TIMEOUT`、`MAX_TOOL_THREADS` 和 `MAX_ALIGNMENT_OUTPUT_BYTES` 限制多序列比对；django-q2 task timeout 会比 MAFFT subprocess timeout 多 30 秒用于安全收尾。
+- `Q_CLUSTER_RETRY` 必须严格大于普通与 MAFFT task timeout；配置不安全时后端会拒绝启动。
 - PlantCARE 外部等待不占用 worker。
 - 迁移自动创建 `gene-family-poll-external-results` Schedule，每分钟批量检查邮箱。
 - 任务与轮询均使用租约，避免多 worker 重复处理；过期运行租约会被标记为 `WORKER_LEASE_EXPIRED`。
@@ -147,3 +149,7 @@ docker compose logs --tail 200 worker
 ### Artifact 下载 404
 
 检查数据库 Artifact 记录和共享 volume 是否同时存在，不要手工修改 `storage_path`。
+
+### MAFFT capability unavailable
+
+生产 Docker 镜像已安装 MAFFT。本机运行时确认 `MAFFT_EXECUTABLE` 指向可执行文件，并访问 `/api/core/capabilities` 查看探测结果。更改可执行文件配置后需要重启 API 和 worker。

@@ -116,11 +116,31 @@ USE_TZ = True
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+MAFFT_EXECUTABLE = os.getenv('MAFFT_EXECUTABLE', 'mafft')
+MAFFT_TIMEOUT = int(os.getenv('MAFFT_TIMEOUT', '1800'))
+MAFFT_DEFAULT_THREADS = int(os.getenv('MAFFT_DEFAULT_THREADS', '2'))
+MAX_TOOL_THREADS = int(os.getenv('MAX_TOOL_THREADS', '8'))
+MAX_ALIGNMENT_OUTPUT_BYTES = int(
+    os.getenv('MAX_ALIGNMENT_OUTPUT_BYTES', str(100 * 1024 * 1024))
+)
+TOOL_PROBE_TIMEOUT = int(os.getenv('TOOL_PROBE_TIMEOUT', '5'))
+Q_CLUSTER_TIMEOUT = int(os.getenv('Q_CLUSTER_TIMEOUT', '300'))
+Q_CLUSTER_RETRY = int(
+    os.getenv(
+        'Q_CLUSTER_RETRY',
+        str(max(Q_CLUSTER_TIMEOUT, MAFFT_TIMEOUT + 30) + 60),
+    )
+)
+if Q_CLUSTER_RETRY <= max(Q_CLUSTER_TIMEOUT, MAFFT_TIMEOUT + 30):
+    raise RuntimeError(
+        'Q_CLUSTER_RETRY must be greater than the longest django-q2 task timeout'
+    )
+
 Q_CLUSTER = {
     'name': 'gene_family_backend',
     'workers': 2,
-    'timeout': int(os.getenv('Q_CLUSTER_TIMEOUT', '300')),
-    'retry': int(os.getenv('Q_CLUSTER_RETRY', '360')),
+    'timeout': Q_CLUSTER_TIMEOUT,
+    'retry': Q_CLUSTER_RETRY,
     'max_attempts': int(os.getenv('Q_CLUSTER_MAX_ATTEMPTS', '1')),
     'queue_limit': 50,
     'bulk': 10,

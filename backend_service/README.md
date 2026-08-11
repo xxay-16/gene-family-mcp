@@ -7,6 +7,7 @@ Gene Family MCP 的 API 与任务执行后端，基于 Django、Django Ninja 和
 - 对外提供 HTTP API。
 - 校验分析输入并创建异步任务。
 - 按 SHA-256 保存和复用 FASTA 输入，生成规范化 FASTA 与校验摘要。
+- 使用 MAFFT 消费规范化 FASTA Artifact，并保存对齐结果与工具溯源。
 - 调用 PlantCARE 等远程服务或本地生信程序。
 - 轮询外部结果并保存分析产物。
 - 管理任务状态、错误和结果。
@@ -71,3 +72,5 @@ Set-Location .\backend_service
 django-q2 承担执行队列和外部结果调度；对外任务 ID、状态、事件和产物由 `jobs` app 持久化。PlantCARE 提交任务会快速进入 `waiting_external`，由数据库迁移自动创建的 django-q2 Schedule 每分钟批量检查邮箱，不会长期占用提交 worker。
 
 `fasta_validation` 是本地异步任务。API 不把大段 FASTA 写入任务参数，而是先写入共享 Artifact 存储并在数据库保存 SHA-256 清单；worker 在读取时再次检查文件大小和校验和。可通过 `.env.example` 中的 `MAX_FASTA_*` 与 `DATA_UPLOAD_MAX_MEMORY_SIZE` 配置输入上限。
+
+`multiple_sequence_alignment` 只接受成功任务产生的 `normalized_fasta` Artifact。MAFFT 的可执行文件、超时、线程和输出上限由 `MAFFT_*`、`MAX_TOOL_THREADS` 与 `MAX_ALIGNMENT_OUTPUT_BYTES` 配置。能力接口会真实探测可执行文件；缺失时任务以 `CAPABILITY_UNAVAILABLE` 失败。

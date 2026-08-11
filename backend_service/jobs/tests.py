@@ -266,6 +266,7 @@ class JobExecutionTests(TestCase):
         self.assertEqual(payload['args'], (str(job.id),))
         self.assertEqual(payload['id'], job.queue_task_id)
         self.assertFalse(payload['save'])
+        self.assertNotIn('timeout', payload)
 
     @patch('jobs.services.async_task', return_value='q2-task-idempotent')
     def test_idempotency_key_reuses_business_job(self, async_task_mock):
@@ -598,3 +599,123 @@ class JobExecutionTests(TestCase):
         self.assertEqual(job.status, AnalysisJob.Status.FAILED)
         self.assertEqual(job.error_code, 'INVALID_FASTA')
         self.assertIn('checksum', job.error_message)
+
+    def test_alignment_job_uses_mafft_and_preserves_provenance(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir)
+            with override_settings(
+                ARTIFACT_ROOT=artifact_root,
+                MAFFT_TIMEOUT=10,
+            ):
+                input_artifact, _ = create_fasta_input(
+                    '>gene1\nACGT\n>gene2\nACGTA\n'
+                )
+                validation_job = AnalysisJob.objects.create(
+                    analysis_type=AnalysisJob.AnalysisType.FASTA_VALIDATION,
+                    parameters={
+                        'input_artifact_id': str(input_artifact.id),
+                        'alphabet': 'dna',
+                    },
+                )
+                execute_analysis_job(str(validation_job.id))
+                source = Artifact.objects.get(
+                    job=validation_job,
+                    kind='normalized_fasta',
+                )
+                alignment_job, _ = create_analysis_job(
+                    AnalysisJob.AnalysisType.MULTIPLE_SEQUENCE_ALIGNMENT,
+                    {
+                        'artifact_id': str(source.id),
+                        'strategy': 'auto',
+                        'threads': 1,
+                    },
+                )
+                queued = OrmQ.objects.get()
+                payload = SignedPackage.loads(queued.payload)
+                def fake_mafft(
+                    input_path,
+                    output_path,
+                    *,
+                    strategy,
+                    threads,
+                    timeout,
+                ):
+                    self.assertTrue(input_path.is_file())
+                    self.assertEqual(strategy, 'auto')
+                    self.assertEqual(threads, 1)
+                    self.assertEqual(timeout, 10)
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_text(
+                        '>gene1\nACGT-\n>gene2\nACGTA\n',
+                        encoding='utf-8',
+                    )
+                    return {
+                        'executable': 'fake-mafft',
+                        'version': 'v-test',
+                        'strategy': strategy,
+                        'threads': threads,
+                        'stderr_tail': '',
+                    }
+
+                with patch('jobs.tasks.run_mafft', side_effect=fake_mafft):
+                    result = execute_analysis_job(str(alignment_job.id))
+
+                alignment_job.refresh_from_db()
+                aligned = Artifact.objects.get(
+                    job=alignment_job,
+                    kind='aligned_fasta',
+                )
+                aligned_text = (
+                    artifact_root / aligned.storage_path
+                ).read_text(encoding='utf-8')
+
+        self.assertEqual(payload['timeout'], 40)
+        self.assertEqual(result['status'], AnalysisJob.Status.SUCCEEDED)
+        self.assertEqual(alignment_job.status, AnalysisJob.Status.SUCCEEDED)
+        self.assertEqual(alignment_job.result['summary']['alignment_length'], 5)
+        self.assertEqual(alignment_job.result['summary']['gap_count'], 1)
+        self.assertEqual(aligned_text, '>gene1\nACGT-\n>gene2\nACGTA\n')
+        self.assertEqual(aligned.metadata['source_artifact_id'], str(source.id))
+        self.assertEqual(aligned.metadata['strategy'], 'auto')
+        self.assertEqual(aligned.metadata['tool_version'], 'v-test')
+
+    @override_settings(MAFFT_EXECUTABLE='definitely-missing-mafft')
+    def test_alignment_worker_reports_unavailable_runtime(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir)
+            with override_settings(ARTIFACT_ROOT=artifact_root):
+                source_job = AnalysisJob.objects.create(
+                    analysis_type=AnalysisJob.AnalysisType.FASTA_VALIDATION,
+                    status=AnalysisJob.Status.SUCCEEDED,
+                    result={'summary': {'record_count': 2, 'alphabet': 'dna'}},
+                )
+                source_path = artifact_root / str(source_job.id) / 'normalized.fasta'
+                source_path.parent.mkdir(parents=True)
+                source_path.write_text('>a\nACGT\n>b\nACGT\n', encoding='utf-8')
+                source = Artifact.objects.create(
+                    job=source_job,
+                    kind='normalized_fasta',
+                    filename='normalized.fasta',
+                    storage_path=str(source_path.relative_to(artifact_root)),
+                    media_type='text/x-fasta',
+                    size=source_path.stat().st_size,
+                    sha256=hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                    metadata={'alphabet': 'dna'},
+                )
+                job = AnalysisJob.objects.create(
+                    analysis_type=(
+                        AnalysisJob.AnalysisType.MULTIPLE_SEQUENCE_ALIGNMENT
+                    ),
+                    parameters={
+                        'artifact_id': str(source.id),
+                        'strategy': 'auto',
+                        'threads': 1,
+                    },
+                )
+
+                result = execute_analysis_job(str(job.id))
+
+        job.refresh_from_db()
+        self.assertEqual(result['status'], AnalysisJob.Status.FAILED)
+        self.assertEqual(job.error_code, 'CAPABILITY_UNAVAILABLE')
+        self.assertIn('not available', job.error_message)

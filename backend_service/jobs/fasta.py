@@ -137,3 +137,67 @@ def parse_and_normalize_fasta(
         summary['gc_percent'] = round(gc_count * 100 / total_residues, 2)
 
     return '\n'.join(output_lines) + '\n', summary
+
+
+def summarize_fasta_alignment(text: str, *, alphabet: str) -> dict:
+    records: list[tuple[str, str]] = []
+    current_identifier: str | None = None
+    sequence_lines: list[str] = []
+
+    def finish_record() -> None:
+        if current_identifier is None:
+            return
+        sequence = ''.join(sequence_lines).replace(' ', '').replace('\t', '').upper()
+        if not sequence:
+            raise ValueError(f'aligned sequence {current_identifier!r} is empty')
+        records.append((current_identifier, sequence))
+
+    for line_number, raw_line in enumerate(
+        text.replace('\r\n', '\n').replace('\r', '\n').split('\n'),
+        start=1,
+    ):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith('>'):
+            finish_record()
+            header = line[1:].strip()
+            if not header:
+                raise ValueError(f'alignment header on line {line_number} is empty')
+            current_identifier = header.split()[0]
+            sequence_lines = []
+        else:
+            if current_identifier is None:
+                raise ValueError('alignment sequence appears before the first header')
+            sequence_lines.append(line)
+    finish_record()
+
+    if len(records) < 2:
+        raise ValueError('multiple sequence alignment requires at least two sequences')
+    widths = {len(sequence) for _, sequence in records}
+    if len(widths) != 1:
+        raise ValueError('MAFFT output sequences do not have equal alignment lengths')
+    normalized_alphabet = alphabet.strip().lower()
+    allowed = (DNA_ALPHABET if normalized_alphabet == 'dna' else PROTEIN_ALPHABET) | {
+        '-',
+    }
+    observed = set().union(*(set(sequence) for _, sequence in records))
+    invalid = observed - allowed
+    if invalid:
+        raise ValueError(
+            f'alignment contains invalid {normalized_alphabet} symbols: '
+            f'{"".join(sorted(invalid))}'
+        )
+    alignment_length = widths.pop()
+    gap_count = sum(sequence.count('-') for _, sequence in records)
+    return {
+        'record_count': len(records),
+        'alignment_length': alignment_length,
+        'gap_count': gap_count,
+        'gap_percent': round(
+            gap_count * 100 / (alignment_length * len(records)),
+            2,
+        ),
+        'alphabet': normalized_alphabet,
+        'identifier_preview': [identifier for identifier, _ in records[:20]],
+    }

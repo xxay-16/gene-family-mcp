@@ -132,5 +132,22 @@ class BackendClient:
         job['input_artifact'] = input_artifact
         return job
 
+    def submit_multiple_sequence_alignment(
+        self,
+        artifact_id: str,
+        strategy: str = 'auto',
+        threads: int = 2,
+        idempotency_key: str = '',
+    ) -> dict[str, Any]:
+        return self.create_job(
+            'multiple_sequence_alignment',
+            {
+                'artifact_id': artifact_id,
+                'strategy': strategy,
+                'threads': threads,
+            },
+            idempotency_key=idempotency_key,
+        )
+
     def get_task_status(self, task_id: str) -> dict[str, Any]:
         return self.get_job(task_id)
