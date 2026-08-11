@@ -144,7 +144,7 @@ MCP 结果只返回结构化摘要和 artifact ID；需要时再读取对应资�
 
 1. [x] `submit_prediction`：提交序列，返回外部 `ref`。
 2. [x] `collect_results`：单次批量检查邮箱，不在内部 `sleep`。
-3. [ ] `PlantCareResultParser`：安全解包并解析 `.tab`/HTML。
+3. [x] `PlantCareResultParser`：限制成员数量/大小，拒绝路径穿越与特殊成员，解析 `.tab` 并生成结构化 JSON。
 4. [x] django-q2 Schedule：周期性寻找 `waiting_external` 任务并检查结果。
 
 ```mermaid
@@ -242,7 +242,7 @@ sequenceDiagram
 1. [x] 完成两服务目录和 HTTP 边界。
 2. [x] 建立 `AnalysisJob`、`Artifact`、`AnalysisEvent`。
 3. [x] 统一 `/api/jobs` 契约和 MCP tools。
-4. [ ] 完成 PlantCARE 附件结构化 parser（submitter 和 collector 已拆分）。
+4. [x] 完成 PlantCARE submitter、collector 和结构化 parser。
 5. [x] 建立 django-q2 Schedule，移除 worker 内邮箱长轮询。
 6. [ ] 扩展测试、认证和稳定错误码。
 7. [ ] 接入完整基因家族分析工具链。

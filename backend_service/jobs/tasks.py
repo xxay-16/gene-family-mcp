@@ -9,6 +9,7 @@ from django.conf import settings
 from django.utils import timezone
 
 from cis_elements.services import collect_results, submit_prediction
+from cis_elements.parser import process_plantcare_attachments
 
 from .models import AnalysisJob, Artifact
 from .services import add_event, artifact_payload
@@ -37,14 +38,31 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _register_artifact(job: AnalysisJob, path: Path) -> Artifact:
+def _artifact_kind(path: Path, structured_path: Path | None = None) -> str:
+    if structured_path is not None and path.resolve() == structured_path.resolve():
+        return 'plantcare_structured_result'
+    if path.suffix.lower() == '.tab':
+        return 'plantcare_table'
+    if path.suffix.lower() in {'.html', '.htm'}:
+        return 'plantcare_report'
+    if path.name.lower().endswith(('.tar.gz', '.tgz', '.tar')):
+        return 'plantcare_archive'
+    return 'plantcare_attachment'
+
+
+def _register_artifact(
+    job: AnalysisJob,
+    path: Path,
+    *,
+    structured_path: Path | None = None,
+) -> Artifact:
     artifact_root = Path(settings.ARTIFACT_ROOT).resolve()
     resolved_path = path.resolve()
     if not resolved_path.is_relative_to(artifact_root):
         raise ValueError('artifact path is outside ARTIFACT_ROOT')
     storage_path = str(resolved_path.relative_to(artifact_root))
     defaults = {
-        'kind': 'plantcare_attachment',
+        'kind': _artifact_kind(resolved_path, structured_path),
         'filename': resolved_path.name,
         'media_type': mimetypes.guess_type(resolved_path.name)[0]
         or 'application/octet-stream',
@@ -59,11 +77,16 @@ def _register_artifact(job: AnalysisJob, path: Path) -> Artifact:
     return artifact
 
 
-def _public_result(provider_result: dict, artifacts: list[Artifact]) -> dict:
+def _public_result(
+    provider_result: dict,
+    artifacts: list[Artifact],
+    summary: dict,
+) -> dict:
     return {
         'ref': provider_result.get('ref', ''),
         'subject': provider_result.get('subject', ''),
         'date': provider_result.get('date', ''),
+        'summary': summary,
         'artifacts': [artifact_payload(artifact) for artifact in artifacts],
     }
 
@@ -102,8 +125,39 @@ def _fail_job(job: AnalysisJob, error_code: str, error_message: str, exc=None):
 
 def _complete_job(job: AnalysisJob, provider_result: dict):
     output_files = [Path(path) for path in provider_result.get('attachments', [])]
-    artifacts = [_register_artifact(job, path) for path in output_files]
-    job.result = _public_result(provider_result, artifacts)
+    output_dir = Path(settings.ARTIFACT_ROOT) / str(job.id)
+    processed = process_plantcare_attachments(
+        output_files,
+        output_dir,
+        max_members=settings.PLANTCARE_ARCHIVE_MAX_MEMBERS,
+        max_file_size=settings.PLANTCARE_ARCHIVE_MAX_FILE_SIZE,
+        max_total_size=settings.PLANTCARE_ARCHIVE_MAX_TOTAL_SIZE,
+    )
+    all_files = []
+    seen = set()
+    for path in [
+        *output_files,
+        *processed['derived_files'],
+        processed['structured_path'],
+    ]:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        all_files.append(path)
+    artifacts = [
+        _register_artifact(
+            job,
+            path,
+            structured_path=processed['structured_path'],
+        )
+        for path in all_files
+    ]
+    job.result = _public_result(
+        provider_result,
+        artifacts,
+        processed['summary'],
+    )
     job.status = AnalysisJob.Status.SUCCEEDED
     job.stage = 'completed'
     job.progress = 100

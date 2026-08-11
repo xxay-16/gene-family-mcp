@@ -14,6 +14,8 @@ MCP Client  <──stdio──>  mcp_server  <──HTTP/JSON──>  backend_se
 
 > 当前状态：MCP 与后端已经分层，后端具备持久化业务任务、事件、产物清单和 django-q2 ORM 队列。PlantCARE 提交与结果回收已拆成两个阶段，结果由 django-q2 Schedule 每分钟检查；完整基因家族分析工作流尚未实现。
 
+PlantCARE 邮件附件会经过安全归档检查与结构化解析。`.tab` 结果被转换为 JSON，包含记录总数、序列计数、元件类型计数、各元件频数和完整位点记录；原始归档、HTML、TSV 与 JSON 均作为带 SHA-256 的 Artifact 保存。
+
 ## 两个服务的职责
 
 ### `mcp_server`
@@ -191,6 +193,7 @@ flowchart LR
 - [ ] 为 MCP 与后端通信增加认证、稳定错误码和超时策略。
 - [ ] 增加单元测试、API 集成测试和 MCP 工具测试。
 - [ ] 增加 FASTA 资源上传与 artifact 下载 API。
+- [x] 安全解析 PlantCARE 归档与 `.tab`，生成结构化 JSON Artifact。
 - [ ] 接入 BLAST/DIAMOND、HMMER、MAFFT 和 IQ-TREE。
 
 ## 工程检查

@@ -48,6 +48,36 @@ class JobAPITests(TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()['error']['code'], 'JOB_NOT_COMPLETE')
 
+    def test_completed_result_returns_artifact_manifest(self):
+        job = AnalysisJob.objects.create(
+            analysis_type=AnalysisJob.AnalysisType.CIS_ELEMENTS,
+            parameters={'sequence': 'ACGT'},
+            status=AnalysisJob.Status.SUCCEEDED,
+            stage='completed',
+            progress=100,
+            result={'summary': {'record_count': 2}},
+        )
+        Artifact.objects.create(
+            job=job,
+            kind='plantcare_structured_result',
+            filename='plantcare_result.json',
+            storage_path=f'{job.id}/plantcare_result.json',
+            media_type='application/json',
+            size=10,
+            sha256='a' * 64,
+        )
+
+        response = self.client.get(f'/api/jobs/{job.id}/result')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['result']['summary']['record_count'], 2)
+        self.assertEqual(
+            payload['artifacts'][0]['kind'],
+            'plantcare_structured_result',
+        )
+        self.assertIn('/api/artifacts/', payload['artifacts'][0]['download_url'])
+
     def test_cancel_queued_job(self):
         job = AnalysisJob.objects.create(
             analysis_type=AnalysisJob.AnalysisType.CIS_ELEMENTS,
@@ -122,7 +152,10 @@ class JobExecutionTests(TestCase):
             output_dir = artifact_root / str(job.id)
             output_dir.mkdir(parents=True)
             result_file = output_dir / 'plantcare.tab'
-            result_file.write_text('motif\tcount\nTATA-box\t2\n', encoding='utf-8')
+            result_file.write_text(
+                'gene1\tTATA-box\tTATA\t10\t4\t+\tArabidopsis\tcore promoter\n',
+                encoding='utf-8',
+            )
 
             def collector(ref_to_output_dir):
                 self.assertEqual(
@@ -141,12 +174,23 @@ class JobExecutionTests(TestCase):
                 result = poll_waiting_external_jobs()
 
             job.refresh_from_db()
-            artifact = Artifact.objects.get(job=job)
+            artifact = Artifact.objects.get(
+                job=job,
+                kind='plantcare_table',
+            )
             self.assertEqual(result['completed'], 1)
             self.assertEqual(job.status, AnalysisJob.Status.SUCCEEDED)
             self.assertEqual(job.progress, 100)
             self.assertNotIn(str(artifact_root), str(job.result))
             self.assertEqual(artifact.filename, 'plantcare.tab')
+            self.assertEqual(job.result['summary']['record_count'], 1)
+            self.assertEqual(Artifact.objects.filter(job=job).count(), 2)
+            self.assertTrue(
+                Artifact.objects.filter(
+                    job=job,
+                    kind='plantcare_structured_result',
+                ).exists()
+            )
             self.assertEqual(
                 artifact.sha256,
                 hashlib.sha256(result_file.read_bytes()).hexdigest(),
