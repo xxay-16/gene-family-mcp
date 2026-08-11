@@ -14,7 +14,6 @@ from urllib.error import HTTPError, URLError
 
 from plantcare_submit import PLANTCARE_URL, build_multipart
 
-
 HOST_MAP = {
     "gmail.com": "imap.gmail.com",
     "outlook.com": "outlook.office365.com",

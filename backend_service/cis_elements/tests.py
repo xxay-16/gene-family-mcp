@@ -2,7 +2,6 @@ import uuid
 from unittest.mock import patch
 
 from django.test import Client, TestCase
-
 from jobs.models import AnalysisJob
 
 

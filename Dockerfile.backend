@@ -1,0 +1,17 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY backend_service/requirements.txt /app/backend_service/requirements.txt
+RUN pip install --no-cache-dir -r /app/backend_service/requirements.txt
+
+COPY backend_service /app/backend_service
+COPY docker/backend-entrypoint.sh /app/docker/backend-entrypoint.sh
+RUN chmod +x /app/docker/backend-entrypoint.sh
+
+WORKDIR /app/backend_service
+ENTRYPOINT ["/app/docker/backend-entrypoint.sh"]
+CMD ["api"]

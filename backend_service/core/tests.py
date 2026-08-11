@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from django.test import Client, TestCase, override_settings
 
 
@@ -27,3 +29,18 @@ class HealthAPITests(TestCase):
         self.assertEqual(unauthorized.json()['error']['code'], 'UNAUTHORIZED')
         self.assertEqual(authorized.status_code, 200)
         self.assertEqual(health.status_code, 200)
+
+    def test_ready_endpoint_checks_database_and_schedule(self):
+        response = Client().get('/api/core/ready')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['status'], 'ready')
+
+    @patch('core.api.Schedule.objects.filter')
+    def test_ready_endpoint_reports_missing_schedule(self, filter_mock):
+        filter_mock.return_value.exclude.return_value.exists.return_value = False
+
+        response = Client().get('/api/core/ready')
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()['status'], 'not_ready')

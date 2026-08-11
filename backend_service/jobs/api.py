@@ -6,7 +6,13 @@ from ninja import Router, Schema
 from ninja.responses import Response
 
 from .models import AnalysisJob, Artifact
-from .services import cancel_analysis_job, create_analysis_job, job_payload
+from .services import (
+    IdempotencyConflictError,
+    JobCapacityError,
+    cancel_analysis_job,
+    create_analysis_job,
+    job_payload,
+)
 
 router = Router(tags=['jobs'])
 artifact_router = Router(tags=['artifacts'])
@@ -29,8 +35,12 @@ def create_job(request, payload: JobCreateIn):
             payload.parameters,
             idempotency_key=request.headers.get('Idempotency-Key', ''),
         )
+    except IdempotencyConflictError as exc:
+        return _error('IDEMPOTENCY_CONFLICT', str(exc), 409)
     except ValueError as exc:
         return _error('INVALID_INPUT', str(exc), 422)
+    except JobCapacityError as exc:
+        return _error('JOB_CAPACITY_REACHED', str(exc), 503)
     except RuntimeError as exc:
         return _error('QUEUE_UNAVAILABLE', str(exc), 503)
     response = job_payload(job)
@@ -112,8 +122,9 @@ def cancel_job(request, job_id: UUID):
 @artifact_router.get('/{artifact_id}/download')
 def download_artifact(request, artifact_id: UUID):
     artifact = get_object_or_404(Artifact, id=artifact_id)
-    from django.conf import settings
     from pathlib import Path
+
+    from django.conf import settings
 
     artifact_root = Path(settings.ARTIFACT_ROOT).resolve()
     file_path = (artifact_root / artifact.storage_path).resolve()

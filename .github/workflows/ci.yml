@@ -28,8 +28,32 @@ jobs:
           python manage.py makemigrations --check --dry-run
           python manage.py test --verbosity 2
 
+      - name: Lint
+        run: python -m ruff check backend_service mcp_server
+
       - name: MCP tests
         run: python -m unittest discover -s mcp_server/tests -v
 
+      - name: Coverage
+        run: |
+          python -m coverage erase
+          python -m coverage run --append backend_service/manage.py test cis_elements core jobs --verbosity 1
+          python -m coverage run --append -m unittest discover -s mcp_server/tests -v
+          python -m coverage report
+
       - name: Compile Python modules
         run: python -m compileall -q backend_service mcp_server
+
+      - name: Validate Compose configuration
+        env:
+          POSTGRES_PASSWORD: ci-postgres-password
+          BACKEND_API_TOKEN: ci-backend-token
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+
+      - name: Build service images
+        env:
+          POSTGRES_PASSWORD: ci-postgres-password
+          BACKEND_API_TOKEN: ci-backend-token
+        run: docker compose --profile mcp build api worker mcp

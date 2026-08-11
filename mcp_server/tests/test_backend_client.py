@@ -3,6 +3,7 @@ import json
 from unittest import TestCase
 from unittest.mock import patch
 
+from mcp_server import server
 from mcp_server.backend_client import BackendAPIError, BackendClient
 
 
@@ -93,3 +94,38 @@ class BackendClientTests(TestCase):
             raised.exception.detail,
             {'error': {'code': 'JOB_NOT_FOUND'}},
         )
+
+
+class MCPToolTests(TestCase):
+    @patch.object(server.backend, 'health', return_value={'status': 'ok'})
+    @patch.object(server.backend, 'capabilities', return_value={'analysis_types': {}})
+    def test_health_and_capability_tools(self, capabilities_mock, health_mock):
+        self.assertEqual(server.backend_health(), {'status': 'ok'})
+        self.assertEqual(server.get_capabilities(), {'analysis_types': {}})
+        health_mock.assert_called_once()
+        capabilities_mock.assert_called_once()
+
+    @patch.object(server.backend, 'submit_cis_element_analysis')
+    @patch.object(server.backend, 'get_job')
+    @patch.object(server.backend, 'get_job_result')
+    @patch.object(server.backend, 'cancel_job')
+    def test_job_tools_delegate_to_backend(
+        self,
+        cancel_mock,
+        result_mock,
+        status_mock,
+        submit_mock,
+    ):
+        submit_mock.return_value = {'job_id': 'job-1'}
+        status_mock.return_value = {'status': 'queued'}
+        result_mock.return_value = {'result': {}}
+        cancel_mock.return_value = {'status': 'cancelled'}
+
+        self.assertEqual(
+            server.submit_cis_element_analysis('ACGT', 'key-1'),
+            {'job_id': 'job-1'},
+        )
+        self.assertEqual(server.get_job_status('job-1'), {'status': 'queued'})
+        self.assertEqual(server.get_job_result('job-1'), {'result': {}})
+        self.assertEqual(server.cancel_job('job-1'), {'status': 'cancelled'})
+        submit_mock.assert_called_once_with('ACGT', 'key-1')

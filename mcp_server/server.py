@@ -2,7 +2,6 @@ from mcp.server.fastmcp import FastMCP
 
 from .backend_client import BackendClient
 
-
 mcp = FastMCP('gene-family-mcp')
 backend = BackendClient()
 

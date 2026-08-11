@@ -1,0 +1,78 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: gene_family
+      POSTGRES_USER: gene_family
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gene_family -d gene_family"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: ["api"]
+    env_file: .env
+    environment: &backend-environment
+      DJANGO_DEBUG: "false"
+      DJANGO_ALLOWED_HOSTS: 127.0.0.1,localhost,api
+      DJANGO_SECURE_SSL_REDIRECT: "false"
+      DB_ENGINE: django.db.backends.postgresql
+      DB_NAME: gene_family
+      DB_USER: gene_family
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      ARTIFACT_ROOT: /data/artifacts
+      RUN_MIGRATIONS: "true"
+    volumes:
+      - artifact-data:/data/artifacts
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/core/ready', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: ["worker"]
+    env_file: .env
+    environment:
+      <<: *backend-environment
+      RUN_MIGRATIONS: "false"
+    volumes:
+      - artifact-data:/data/artifacts
+    depends_on:
+      api:
+        condition: service_healthy
+
+  mcp:
+    profiles: ["mcp"]
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    environment:
+      GENE_FAMILY_BACKEND_URL: http://api:8000/api
+      GENE_FAMILY_BACKEND_TOKEN: ${BACKEND_API_TOKEN}
+      GENE_FAMILY_BACKEND_TIMEOUT: "30"
+    stdin_open: true
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  artifact-data:

@@ -77,6 +77,8 @@ DATABASES = {
         'PASSWORD': os.getenv('DB_PASSWORD', ''),
         'HOST': os.getenv('DB_HOST', ''),
         'PORT': os.getenv('DB_PORT', ''),
+        'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '0' if DEBUG else '60')),
+        'CONN_HEALTH_CHECKS': not DEBUG,
     }
 }
 
@@ -140,6 +142,10 @@ PLANTCARE_RESULT_TIMEOUT = int(
     )
 )
 PLANTCARE_POLL_BATCH_SIZE = int(os.getenv('PLANTCARE_POLL_BATCH_SIZE', '20'))
+JOB_EXECUTION_LEASE_SECONDS = int(os.getenv('JOB_EXECUTION_LEASE_SECONDS', '330'))
+JOB_POLL_LEASE_SECONDS = int(os.getenv('JOB_POLL_LEASE_SECONDS', '120'))
+MAX_SEQUENCE_LENGTH = int(os.getenv('MAX_SEQUENCE_LENGTH', '1000000'))
+MAX_ACTIVE_JOBS = int(os.getenv('MAX_ACTIVE_JOBS', '1000'))
 PLANTCARE_ARCHIVE_MAX_MEMBERS = int(
     os.getenv('PLANTCARE_ARCHIVE_MAX_MEMBERS', '100')
 )
@@ -166,3 +172,22 @@ SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool(
 SECURE_HSTS_PRELOAD = env_bool('DJANGO_SECURE_HSTS_PRELOAD', not DEBUG)
 SESSION_COOKIE_SECURE = env_bool('DJANGO_SESSION_COOKIE_SECURE', not DEBUG)
 CSRF_COOKIE_SECURE = env_bool('DJANGO_CSRF_COOKIE_SECURE', not DEBUG)
+
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'json': {'()': 'core.logging.JsonFormatter'},
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'json',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': LOG_LEVEL,
+    },
+}

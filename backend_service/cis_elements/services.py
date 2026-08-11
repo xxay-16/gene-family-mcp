@@ -21,8 +21,8 @@ def _build_multipart(fields, file_field=None):
     boundary = f'----PlantCAREBoundary{uuid.uuid4().hex}'
     chunks = []
     for name, value in fields.items():
-        chunks.append(f'--{boundary}\r\n'.encode('utf-8'))
-        chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode('utf-8'))
+        chunks.append(f'--{boundary}\r\n'.encode())
+        chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
         chunks.append(str(value).encode('utf-8'))
         chunks.append(b'\r\n')
     if file_field is not None:
@@ -30,12 +30,12 @@ def _build_multipart(fields, file_field=None):
         filename = Path(file_path).name
         mime_type = mimetypes.guess_type(filename)[0] or 'text/plain'
         file_bytes = Path(file_path).read_bytes()
-        chunks.append(f'--{boundary}\r\n'.encode('utf-8'))
-        chunks.append(f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'.encode('utf-8'))
-        chunks.append(f'Content-Type: {mime_type}\r\n\r\n'.encode('utf-8'))
+        chunks.append(f'--{boundary}\r\n'.encode())
+        chunks.append(f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'.encode())
+        chunks.append(f'Content-Type: {mime_type}\r\n\r\n'.encode())
         chunks.append(file_bytes)
         chunks.append(b'\r\n')
-    chunks.append(f'--{boundary}--\r\n'.encode('utf-8'))
+    chunks.append(f'--{boundary}--\r\n'.encode())
     return b''.join(chunks), f'multipart/form-data; boundary={boundary}'
 
 
@@ -178,7 +178,6 @@ def collect_results(ref_to_output_dir: dict[str, Path]):
                 raw_email = msg_data[0][1]
                 message = email.message_from_bytes(raw_email)
                 subject = _decode_text(message.get('Subject', ''))
-                sender = _decode_text(message.get('From', ''))
                 date = _decode_text(message.get('Date', ''))
                 body_text = _extract_text(message)
                 ref_lower = ref.lower()

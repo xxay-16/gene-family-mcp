@@ -149,6 +149,7 @@ $env:GENE_FAMILY_BACKEND_TOKEN = "replace-with-a-random-token"
 MCP Server 默认使用 `stdio` transport。客户端配置时，命令应指向虚拟环境 Python，参数为 `-m mcp_server.server`，工作目录为仓库根目录。
 
 提交工具支持可选 `idempotency_key`。相同分析类型和幂等键会返回原业务任务，不会重复提交 django-q2 或 PlantCARE。
+相同幂等键如果携带不同参数会返回 `IDEMPOTENCY_CONFLICT`。后端还可以通过 `MAX_SEQUENCE_LENGTH` 和 `MAX_ACTIVE_JOBS` 限制输入与活跃任务容量。
 
 ## API 示例
 
@@ -214,6 +215,7 @@ Windows 开发环境可以运行：
 该命令执行 Django 系统检查、迁移漂移检查、后端测试、MCP 测试、Python 编译和 Git diff 检查。GitHub Actions 会在 push 和 pull request 时执行对应检查。
 
 更详细的状态模型、数据模型和迁移计划见 [架构文档](docs/architecture.md)。
+生产进程、Docker Compose、备份和故障排查见 [运行与部署手册](docs/operations.md)。
 
 ## 安全说明
 

@@ -7,7 +7,6 @@ from pathlib import Path
 from urllib import request
 from urllib.error import HTTPError, URLError
 
-
 PLANTCARE_URL = "https://bioinformatics.psb.ugent.be/webtools/plantcare/cgi-bin/CallMat_onCluster.htpl"
 
 
@@ -16,9 +15,9 @@ def build_multipart(fields, file_field=None):
     chunks = []
 
     for name, value in fields.items():
-        chunks.append(f"--{boundary}\r\n".encode("utf-8"))
+        chunks.append(f"--{boundary}\r\n".encode())
         chunks.append(
-            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8")
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
         )
         chunks.append(str(value).encode("utf-8"))
         chunks.append(b"\r\n")
@@ -29,18 +28,18 @@ def build_multipart(fields, file_field=None):
         mime_type = mimetypes.guess_type(filename)[0] or "text/plain"
         with open(file_path, "rb") as f:
             file_bytes = f.read()
-        chunks.append(f"--{boundary}\r\n".encode("utf-8"))
+        chunks.append(f"--{boundary}\r\n".encode())
         chunks.append(
             (
                 f'Content-Disposition: form-data; name="{field_name}"; '
                 f'filename="{filename}"\r\n'
-            ).encode("utf-8")
+            ).encode()
         )
-        chunks.append(f"Content-Type: {mime_type}\r\n\r\n".encode("utf-8"))
+        chunks.append(f"Content-Type: {mime_type}\r\n\r\n".encode())
         chunks.append(file_bytes)
         chunks.append(b"\r\n")
 
-    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+    chunks.append(f"--{boundary}--\r\n".encode())
     body = b"".join(chunks)
     content_type = f"multipart/form-data; boundary={boundary}"
     return body, content_type

@@ -78,6 +78,37 @@ class JobAPITests(TestCase):
         )
         self.assertIn('/api/artifacts/', payload['artifacts'][0]['download_url'])
 
+    def test_artifact_download_uses_storage_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir)
+            job = AnalysisJob.objects.create(
+                analysis_type=AnalysisJob.AnalysisType.CIS_ELEMENTS,
+                parameters={'sequence': 'ACGT'},
+                status=AnalysisJob.Status.SUCCEEDED,
+            )
+            file_path = artifact_root / str(job.id) / 'result.json'
+            file_path.parent.mkdir(parents=True)
+            file_path.write_text('{"ok": true}', encoding='utf-8')
+            artifact = Artifact.objects.create(
+                job=job,
+                kind='plantcare_structured_result',
+                filename='result.json',
+                storage_path=str(file_path.relative_to(artifact_root)),
+                media_type='application/json',
+                size=file_path.stat().st_size,
+                sha256='a' * 64,
+            )
+
+            with override_settings(ARTIFACT_ROOT=artifact_root):
+                response = self.client.get(
+                    f'/api/artifacts/{artifact.id}/download'
+                )
+                body = b''.join(response.streaming_content)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body, b'{"ok": true}')
+        self.assertIn('attachment;', response.headers['Content-Disposition'])
+
     def test_cancel_queued_job(self):
         job = AnalysisJob.objects.create(
             analysis_type=AnalysisJob.AnalysisType.CIS_ELEMENTS,
@@ -121,6 +152,9 @@ class JobAPITests(TestCase):
 
 
 class JobExecutionTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+
     def test_business_job_is_enqueued_in_django_q2(self):
         job, created = create_analysis_job(
             AnalysisJob.AnalysisType.CIS_ELEMENTS,
@@ -144,7 +178,7 @@ class JobExecutionTests(TestCase):
         )
         second_job, second_created = create_analysis_job(
             AnalysisJob.AnalysisType.CIS_ELEMENTS,
-            {'sequence': 'TTTT'},
+            {'sequence': 'ACGT'},
             idempotency_key='request-123',
         )
 
@@ -153,6 +187,60 @@ class JobExecutionTests(TestCase):
         self.assertEqual(first_job.id, second_job.id)
         self.assertEqual(first_job.parameters['sequence'], 'ACGT')
         async_task_mock.assert_called_once()
+
+    @patch('jobs.services.async_task', return_value='q2-task-idempotent')
+    def test_idempotency_key_rejects_different_parameters(self, _async_task_mock):
+        create_analysis_job(
+            AnalysisJob.AnalysisType.CIS_ELEMENTS,
+            {'sequence': 'ACGT'},
+            idempotency_key='request-123',
+        )
+
+        response = self.client.post(
+            '/api/jobs',
+            data={
+                'analysis_type': 'cis_elements',
+                'parameters': {'sequence': 'TTTT'},
+            },
+            content_type='application/json',
+            HTTP_IDEMPOTENCY_KEY='request-123',
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()['error']['code'], 'IDEMPOTENCY_CONFLICT')
+
+    @override_settings(MAX_ACTIVE_JOBS=1)
+    def test_capacity_limit_rejects_new_job(self):
+        AnalysisJob.objects.create(
+            analysis_type=AnalysisJob.AnalysisType.CIS_ELEMENTS,
+            parameters={'sequence': 'ACGT'},
+        )
+
+        response = self.client.post(
+            '/api/jobs',
+            data={
+                'analysis_type': 'cis_elements',
+                'parameters': {'sequence': 'TTTT'},
+            },
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()['error']['code'], 'JOB_CAPACITY_REACHED')
+
+    @override_settings(MAX_SEQUENCE_LENGTH=3)
+    def test_sequence_length_limit(self):
+        response = self.client.post(
+            '/api/jobs',
+            data={
+                'analysis_type': 'cis_elements',
+                'parameters': {'sequence': 'ACGT'},
+            },
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertIn('maximum length', response.json()['error']['message'])
 
     def test_poll_schedule_is_installed_by_migration(self):
         schedule = Schedule.objects.get(name='gene-family-poll-external-results')
@@ -177,6 +265,20 @@ class JobExecutionTests(TestCase):
         self.assertIsNotNone(job.external_deadline)
         submit_mock.assert_called_once_with('ACGT')
         self.assertTrue(job.events.filter(event_type='provider_submitted').exists())
+
+    @patch('jobs.tasks.submit_prediction', return_value='provider-ref')
+    def test_submit_worker_cannot_claim_same_job_twice(self, submit_mock):
+        job = AnalysisJob.objects.create(
+            analysis_type=AnalysisJob.AnalysisType.CIS_ELEMENTS,
+            parameters={'sequence': 'ACGT'},
+        )
+
+        first = execute_analysis_job(str(job.id))
+        second = execute_analysis_job(str(job.id))
+
+        self.assertEqual(first['status'], AnalysisJob.Status.WAITING_EXTERNAL)
+        self.assertEqual(second['status'], AnalysisJob.Status.WAITING_EXTERNAL)
+        submit_mock.assert_called_once_with('ACGT')
 
     @override_settings(PLANTCARE_POLL_BATCH_SIZE=20)
     @patch('jobs.tasks.collect_results')
@@ -303,3 +405,20 @@ class JobExecutionTests(TestCase):
         self.assertTrue(
             job.events.filter(event_type='provider_poll_failed').exists()
         )
+
+    @override_settings(PLANTCARE_POLL_BATCH_SIZE=20)
+    def test_scheduler_fails_stale_running_lease(self):
+        job = AnalysisJob.objects.create(
+            analysis_type=AnalysisJob.AnalysisType.CIS_ELEMENTS,
+            parameters={'sequence': 'ACGT'},
+            status=AnalysisJob.Status.RUNNING,
+            stage='submitting',
+            lease_expires_at=timezone.now() - timedelta(seconds=1),
+        )
+
+        result = poll_waiting_external_jobs()
+
+        job.refresh_from_db()
+        self.assertEqual(result['stale_running'], 1)
+        self.assertEqual(job.status, AnalysisJob.Status.FAILED)
+        self.assertEqual(job.error_code, 'WORKER_LEASE_EXPIRED')

@@ -1,4 +1,7 @@
+from django.db import connection
+from django_q.models import Schedule
 from ninja import Router
+from ninja.responses import Response
 
 router = Router(tags=['core'])
 
@@ -6,6 +9,37 @@ router = Router(tags=['core'])
 @router.get('/health')
 def health(request):
     return {'status': 'ok', 'service': 'gene-family-backend'}
+
+
+@router.get('/ready')
+def ready(request):
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT 1')
+            cursor.fetchone()
+        schedule_exists = Schedule.objects.filter(
+            name='gene-family-poll-external-results',
+        ).exclude(repeats=0).exists()
+    except Exception:
+        return Response(
+            {'status': 'not_ready', 'service': 'gene-family-backend'},
+            status=503,
+        )
+    if not schedule_exists:
+        return Response(
+            {
+                'status': 'not_ready',
+                'service': 'gene-family-backend',
+                'reason': 'external result schedule is missing',
+            },
+            status=503,
+        )
+    return {
+        'status': 'ready',
+        'service': 'gene-family-backend',
+        'database': 'ok',
+        'external_result_schedule': 'ok',
+    }
 
 
 @router.get('/capabilities')

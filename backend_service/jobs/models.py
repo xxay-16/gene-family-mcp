@@ -34,6 +34,7 @@ class AnalysisJob(models.Model):
     provider_ref = models.CharField(max_length=128, blank=True, db_index=True)
     external_deadline = models.DateTimeField(null=True, blank=True, db_index=True)
     last_polled_at = models.DateTimeField(null=True, blank=True)
+    lease_expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)

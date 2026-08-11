@@ -1,6 +1,5 @@
 from django.db import migrations, models
 
-
 SCHEDULE_NAME = 'gene-family-poll-external-results'
 SCHEDULE_FUNC = 'jobs.tasks.poll_waiting_external_jobs'
 

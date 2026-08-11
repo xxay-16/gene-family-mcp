@@ -1,10 +1,14 @@
 from uuid import UUID
 
+from jobs.models import AnalysisJob
+from jobs.services import (
+    IdempotencyConflictError,
+    JobCapacityError,
+    create_analysis_job,
+    job_payload,
+)
 from ninja import Router, Schema
 from ninja.responses import Response
-
-from jobs.models import AnalysisJob
-from jobs.services import create_analysis_job, job_payload
 
 router = Router(tags=['cis-elements'])
 
@@ -21,10 +25,20 @@ def submit_sequence(request, payload: SequenceIn):
             {'sequence': payload.sequence},
             idempotency_key=request.headers.get('Idempotency-Key', ''),
         )
+    except IdempotencyConflictError as exc:
+        return Response(
+            {'error': {'code': 'IDEMPOTENCY_CONFLICT', 'message': str(exc)}},
+            status=409,
+        )
     except ValueError as exc:
         return Response(
             {'error': {'code': 'INVALID_SEQUENCE', 'message': str(exc)}},
             status=422,
+        )
+    except JobCapacityError as exc:
+        return Response(
+            {'error': {'code': 'JOB_CAPACITY_REACHED', 'message': str(exc)}},
+            status=503,
         )
     except RuntimeError as exc:
         return Response(

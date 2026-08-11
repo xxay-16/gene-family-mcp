@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from django.db import transaction
+from django.conf import settings
+from django.db import IntegrityError, transaction
 from django_q.models import OrmQ
 from django_q.signing import SignedPackage
 from django_q.tasks import async_task
 
 from .models import AnalysisEvent, AnalysisJob, Artifact
-
 
 TERMINAL_STATUSES = {
     AnalysisJob.Status.SUCCEEDED,
@@ -17,12 +17,24 @@ TERMINAL_STATUSES = {
 }
 
 
+class IdempotencyConflictError(ValueError):
+    pass
+
+
+class JobCapacityError(RuntimeError):
+    pass
+
+
 def normalize_dna_sequence(value: str) -> str:
     sequence = ''.join(value.split()).upper()
     if not sequence:
         raise ValueError('sequence must not be empty')
     if any(base not in 'ACGTN' for base in sequence):
         raise ValueError('sequence must contain only A, C, G, T or N')
+    if len(sequence) > settings.MAX_SEQUENCE_LENGTH:
+        raise ValueError(
+            f'sequence exceeds maximum length of {settings.MAX_SEQUENCE_LENGTH}'
+        )
     return sequence
 
 
@@ -63,15 +75,36 @@ def create_analysis_job(
             idempotency_key=normalized_idempotency_key,
         ).first()
         if existing_job is not None:
+            if existing_job.parameters != normalized_parameters:
+                raise IdempotencyConflictError(
+                    'idempotency key was already used with different parameters'
+                )
             return existing_job, False
 
-    with transaction.atomic():
-        job = AnalysisJob.objects.create(
+    active_count = AnalysisJob.objects.exclude(status__in=TERMINAL_STATUSES).count()
+    if active_count >= settings.MAX_ACTIVE_JOBS:
+        raise JobCapacityError('active analysis job capacity has been reached')
+
+    try:
+        with transaction.atomic():
+            job = AnalysisJob.objects.create(
+                analysis_type=analysis_type,
+                parameters=normalized_parameters,
+                idempotency_key=normalized_idempotency_key,
+            )
+            add_event(job, 'job_created', 'Analysis job created')
+    except IntegrityError:
+        if not normalized_idempotency_key:
+            raise
+        existing_job = AnalysisJob.objects.get(
             analysis_type=analysis_type,
-            parameters=normalized_parameters,
             idempotency_key=normalized_idempotency_key,
         )
-        add_event(job, 'job_created', 'Analysis job created')
+        if existing_job.parameters != normalized_parameters:
+            raise IdempotencyConflictError(
+                'idempotency key was already used with different parameters'
+            ) from None
+        return existing_job, False
 
     try:
         queue_task_id = async_task(
@@ -130,11 +163,19 @@ def cancel_analysis_job(job: AnalysisJob) -> AnalysisJob:
     job.status = AnalysisJob.Status.CANCELLED
     job.stage = 'cancelled'
     job.progress = None
+    job.lease_expires_at = None
     from django.utils import timezone
 
     job.finished_at = timezone.now()
     job.save(
-        update_fields=['status', 'stage', 'progress', 'finished_at', 'updated_at']
+        update_fields=[
+            'status',
+            'stage',
+            'progress',
+            'lease_expires_at',
+            'finished_at',
+            'updated_at',
+        ]
     )
     removed_from_queue = _delete_queued_task(job.queue_task_id)
     add_event(

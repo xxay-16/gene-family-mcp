@@ -5,11 +5,11 @@ import mimetypes
 from datetime import timedelta
 from pathlib import Path
 
-from django.conf import settings
-from django.utils import timezone
-
-from cis_elements.services import collect_results, submit_prediction
 from cis_elements.parser import process_plantcare_attachments
+from cis_elements.services import collect_results, submit_prediction
+from django.conf import settings
+from django.db.models import Q
+from django.utils import timezone
 
 from .models import AnalysisJob, Artifact
 from .services import add_event, artifact_payload
@@ -108,6 +108,7 @@ def _fail_job(job: AnalysisJob, error_code: str, error_message: str, exc=None):
     job.error_code = error_code
     job.error_message = error_message
     job.finished_at = timezone.now()
+    job.lease_expires_at = None
     job.save(
         update_fields=[
             'status',
@@ -116,6 +117,7 @@ def _fail_job(job: AnalysisJob, error_code: str, error_message: str, exc=None):
             'error_code',
             'error_message',
             'finished_at',
+            'lease_expires_at',
             'updated_at',
         ]
     )
@@ -164,6 +166,7 @@ def _complete_job(job: AnalysisJob, provider_result: dict):
     job.finished_at = timezone.now()
     job.error_code = ''
     job.error_message = ''
+    job.lease_expires_at = None
     job.save(
         update_fields=[
             'result',
@@ -173,6 +176,7 @@ def _complete_job(job: AnalysisJob, provider_result: dict):
             'finished_at',
             'error_code',
             'error_message',
+            'lease_expires_at',
             'updated_at',
         ]
     )
@@ -188,6 +192,20 @@ def execute_analysis_job(job_id: str) -> dict:
 
     if job.status == AnalysisJob.Status.CANCELLED:
         return {'job_id': job_id, 'status': job.status}
+    now = timezone.now()
+    claimed = AnalysisJob.objects.filter(
+        id=job_id,
+        status=AnalysisJob.Status.QUEUED,
+    ).filter(
+        Q(lease_expires_at__isnull=True) | Q(lease_expires_at__lte=now)
+    ).update(
+        lease_expires_at=now
+        + timedelta(seconds=settings.JOB_EXECUTION_LEASE_SECONDS)
+    )
+    if not claimed:
+        job.refresh_from_db()
+        return {'job_id': job_id, 'status': job.status}
+    job.refresh_from_db()
 
     try:
         if not _set_state(job, AnalysisJob.Status.RUNNING, 'submitting', 10):
@@ -204,6 +222,7 @@ def execute_analysis_job(job_id: str) -> dict:
         job.status = AnalysisJob.Status.WAITING_EXTERNAL
         job.stage = 'waiting_plantcare'
         job.progress = 40
+        job.lease_expires_at = None
         job.save(
             update_fields=[
                 'provider_ref',
@@ -211,6 +230,7 @@ def execute_analysis_job(job_id: str) -> dict:
                 'status',
                 'stage',
                 'progress',
+                'lease_expires_at',
                 'updated_at',
             ]
         )
@@ -235,32 +255,65 @@ def execute_analysis_job(job_id: str) -> dict:
 def poll_waiting_external_jobs() -> dict:
     """Collect available PlantCARE mail once for a bounded job batch."""
     now = timezone.now()
+    stale_running_jobs = list(
+        AnalysisJob.objects.filter(
+            status=AnalysisJob.Status.RUNNING,
+            lease_expires_at__lte=now,
+        )[: settings.PLANTCARE_POLL_BATCH_SIZE]
+    )
+    for job in stale_running_jobs:
+        _fail_job(
+            job,
+            'WORKER_LEASE_EXPIRED',
+            'Analysis worker stopped before completing the task stage',
+        )
+
     expired_jobs = list(
         AnalysisJob.objects.filter(
             status=AnalysisJob.Status.WAITING_EXTERNAL,
             external_deadline__lte=now,
+        ).filter(
+            Q(lease_expires_at__isnull=True) | Q(lease_expires_at__lte=now)
         )[: settings.PLANTCARE_POLL_BATCH_SIZE]
     )
     for job in expired_jobs:
         _fail_job(job, 'PROVIDER_TIMEOUT', 'PlantCARE result collection timed out')
 
     remaining_capacity = max(
-        settings.PLANTCARE_POLL_BATCH_SIZE - len(expired_jobs),
+        settings.PLANTCARE_POLL_BATCH_SIZE
+        - len(expired_jobs)
+        - len(stale_running_jobs),
         0,
     )
-    jobs = list(
+    candidate_ids = list(
         AnalysisJob.objects.filter(
             status=AnalysisJob.Status.WAITING_EXTERNAL,
             external_deadline__gt=now,
+        ).filter(
+            Q(lease_expires_at__isnull=True) | Q(lease_expires_at__lte=now)
         )
         .exclude(provider_ref='')
-        .order_by('last_polled_at', 'created_at')[:remaining_capacity]
+        .order_by('last_polled_at', 'created_at')
+        .values_list('id', flat=True)[:remaining_capacity]
     )
+    claimed_ids = []
+    poll_lease = now + timedelta(seconds=settings.JOB_POLL_LEASE_SECONDS)
+    for job_id in candidate_ids:
+        claimed = AnalysisJob.objects.filter(
+            id=job_id,
+            status=AnalysisJob.Status.WAITING_EXTERNAL,
+        ).filter(
+            Q(lease_expires_at__isnull=True) | Q(lease_expires_at__lte=now)
+        ).update(lease_expires_at=poll_lease)
+        if claimed:
+            claimed_ids.append(job_id)
+    jobs = list(AnalysisJob.objects.filter(id__in=claimed_ids))
     if not jobs:
         return {
             'checked': 0,
             'completed': 0,
             'expired': len(expired_jobs),
+            'stale_running': len(stale_running_jobs),
         }
 
     ref_to_output_dir = {
@@ -280,7 +333,10 @@ def poll_waiting_external_jobs() -> dict:
     except Exception as exc:
         for job in jobs:
             job.last_polled_at = now
-            job.save(update_fields=['last_polled_at', 'updated_at'])
+            job.lease_expires_at = None
+            job.save(
+                update_fields=['last_polled_at', 'lease_expires_at', 'updated_at']
+            )
             add_event(
                 job,
                 'provider_poll_failed',
@@ -291,16 +347,25 @@ def poll_waiting_external_jobs() -> dict:
             'checked': len(jobs),
             'completed': 0,
             'expired': len(expired_jobs),
+            'stale_running': len(stale_running_jobs),
             'retryable_error': True,
         }
 
     completed = 0
     for job in jobs:
         job.last_polled_at = now
-        job.save(update_fields=['last_polled_at', 'updated_at'])
         provider_result = results.get(job.provider_ref)
         if provider_result is None:
+            job.lease_expires_at = None
+            job.save(
+                update_fields=[
+                    'last_polled_at',
+                    'lease_expires_at',
+                    'updated_at',
+                ]
+            )
             continue
+        job.save(update_fields=['last_polled_at', 'updated_at'])
         job.refresh_from_db()
         if job.status != AnalysisJob.Status.WAITING_EXTERNAL:
             continue
@@ -320,4 +385,5 @@ def poll_waiting_external_jobs() -> dict:
         'checked': len(jobs),
         'completed': completed,
         'expired': len(expired_jobs),
+        'stale_running': len(stale_running_jobs),
     }
